@@ -1,0 +1,31 @@
+{
+  "name": "channel-manager",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Channel manager automation platform for OTAs (Canada + USA) — booking ingestion, conflict prevention, ARI sync, and an admin panel.",
+  "workspaces": [
+    "shared",
+    "backend",
+    "frontend"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "db": "node scripts/dev-db.mjs",
+    "db:stop": "node scripts/dev-db.mjs stop",
+    "setup": "npm install && npm run -w backend prisma:generate && npm run -w backend prisma:migrate && npm run -w backend seed",
+    "dev": "concurrently -n api,worker,web -c green,yellow,cyan \"npm:dev:api\" \"npm:dev:worker\" \"npm:dev:web\"",
+    "dev:api": "npm run -w backend dev",
+    "dev:worker": "npm run -w backend dev:worker",
+    "dev:web": "npm run -w frontend dev",
+    "build": "npm run -w shared build && npm run -w backend build && npm run -w frontend build",
+    "seed": "npm run -w backend seed",
+    "test": "npm run -w backend test",
+    "lint": "npm run -w backend lint"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0",
+    "embedded-postgres": "17.10.0-beta.17"
+  }
+}

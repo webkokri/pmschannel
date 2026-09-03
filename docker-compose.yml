@@ -1,0 +1,26 @@
+# PostgreSQL for machines/servers that have Docker.
+# Local dev on a machine without Docker can use `npm run db` (embedded Postgres) instead.
+#
+#   docker compose up -d
+#   DATABASE_URL="postgresql://cm:cm@127.0.0.1:55432/channel_manager?schema=public" npm run setup
+#
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: cm
+      POSTGRES_PASSWORD: cm
+      POSTGRES_DB: channel_manager
+    ports:
+      - "55432:5432"
+    volumes:
+      - cm_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cm -d channel_manager"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  cm_pgdata:

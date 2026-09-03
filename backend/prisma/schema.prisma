@@ -1,0 +1,378 @@
+// Channel Manager — data model
+// Postgres. Generate the client with `npm run -w backend prisma:generate`.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Auth
+// ─────────────────────────────────────────────────────────────────────────────
+
+enum UserRole {
+  admin
+  manager
+  viewer
+}
+
+model User {
+  id           String     @id @default(cuid())
+  email        String     @unique
+  name         String
+  passwordHash String
+  role         UserRole   @default(viewer)
+  active       Boolean    @default(true)
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+  auditLogs    AuditLog[]
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Property / inventory structure
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Property {
+  id        String   @id @default(cuid())
+  code      String   @unique
+  name      String
+  address   String   @default("")
+  city      String   @default("")
+  region    String   @default("")
+  country   String   @default("US") // ISO-3166 alpha-2, expected CA / US
+  timezone  String   @default("America/New_York")
+  currency  String   @default("USD")
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  roomTypes          RoomType[]
+  channelConnections ChannelConnection[]
+  bookings           Booking[]
+}
+
+model RoomType {
+  id         String   @id @default(cuid())
+  propertyId String
+  property   Property @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+  code       String
+  name       String
+  totalUnits Int      @default(1)
+  maxOccupancy Int    @default(2)
+  basePrice  Decimal  @default(0) @db.Decimal(10, 2)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  ratePlans     RatePlan[]
+  calendarDays  CalendarDay[]
+  roomMappings  RoomMapping[]
+  bookings      Booking[]
+  conflicts     ConflictAlert[]
+
+  @@unique([propertyId, code])
+}
+
+model RatePlan {
+  id           String   @id @default(cuid())
+  roomTypeId   String
+  roomType     RoomType @relation(fields: [roomTypeId], references: [id], onDelete: Cascade)
+  code         String
+  name         String
+  mealPlan     String   @default("room_only") // room_only | breakfast | half_board | all_inclusive
+  cancellationPolicy String @default("flexible")
+  // Optional derived pricing: price = parent rate * (1 + adjustPct/100) + adjustFlat
+  derivedFromId String?
+  adjustPct     Float   @default(0)
+  adjustFlat    Decimal @default(0) @db.Decimal(10, 2)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  roomMappings RoomMapping[]
+  bookings     Booking[]
+
+  @@unique([roomTypeId, code])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Channels (OTAs)
+// ─────────────────────────────────────────────────────────────────────────────
+
+enum ChannelKind {
+  push
+  pull
+  both
+}
+
+model Channel {
+  id           String      @id @default(cuid())
+  code         String      @unique // matches shared/ota-catalog codes
+  name         String
+  category     String      // global | north_america | direct_misc
+  kind         ChannelKind
+  authType     String
+  markets      String[]
+  capabilities String[]
+  docsUrl      String      @default("")
+  notes        String      @default("")
+  active       Boolean     @default(true)
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+
+  connections ChannelConnection[]
+  bookings    Booking[]
+}
+
+model ChannelConnection {
+  id           String   @id @default(cuid())
+  propertyId   String
+  property     Property @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+  channelId    String
+  channel      Channel  @relation(fields: [channelId], references: [id], onDelete: Cascade)
+
+  enabled          Boolean @default(false)
+  // Encrypted JSON blob (see crypto.ts). Never returned raw by the API.
+  credentials      String  @default("")
+  syncAvailability Boolean @default(true)
+  syncRates        Boolean @default(true)
+  syncRestrictions Boolean @default(true)
+  importBookings   Boolean @default(true)
+  pushEnabled      Boolean @default(true)
+  pullIntervalSec  Int     @default(60)
+
+  lastPolledAt   DateTime?
+  lastPushAt     DateTime?
+  lastError      String?
+  status         String    @default("disconnected") // disconnected | connected | error
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  roomMappings RoomMapping[]
+  syncJobs     SyncJob[]
+  syncLogs     SyncLog[]
+
+  @@unique([propertyId, channelId])
+}
+
+model RoomMapping {
+  id                  String            @id @default(cuid())
+  channelConnectionId String
+  channelConnection   ChannelConnection @relation(fields: [channelConnectionId], references: [id], onDelete: Cascade)
+  roomTypeId          String
+  roomType            RoomType          @relation(fields: [roomTypeId], references: [id], onDelete: Cascade)
+  ratePlanId          String?
+  ratePlan            RatePlan?         @relation(fields: [ratePlanId], references: [id], onDelete: SetNull)
+
+  externalRoomId     String
+  externalRatePlanId String   @default("")
+  active             Boolean  @default(true)
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  @@unique([channelConnectionId, externalRoomId, externalRatePlanId])
+  @@index([roomTypeId])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Availability / Rates / Inventory calendar
+// ─────────────────────────────────────────────────────────────────────────────
+
+model CalendarDay {
+  id            String   @id @default(cuid())
+  roomTypeId    String
+  roomType      RoomType @relation(fields: [roomTypeId], references: [id], onDelete: Cascade)
+  date          DateTime @db.Date
+
+  price          Decimal @default(0) @db.Decimal(10, 2)
+  availableUnits Int     @default(0)
+  minStay        Int     @default(1)
+  maxStay        Int     @default(0) // 0 = no cap
+  closedToArrival   Boolean @default(false)
+  closedToDeparture Boolean @default(false)
+  stopSell          Boolean @default(false)
+
+  updatedAt DateTime @updatedAt
+
+  @@unique([roomTypeId, date])
+  @@index([date])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Bookings
+// ─────────────────────────────────────────────────────────────────────────────
+
+enum BookingStatus {
+  confirmed
+  modified
+  cancelled
+  rejected
+}
+
+model Booking {
+  id             String        @id @default(cuid())
+  propertyId     String
+  property       Property      @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+  sourceChannelId String
+  sourceChannel  Channel       @relation(fields: [sourceChannelId], references: [id])
+  roomTypeId     String?
+  roomType       RoomType?     @relation(fields: [roomTypeId], references: [id], onDelete: SetNull)
+  ratePlanId     String?
+  ratePlan       RatePlan?     @relation(fields: [ratePlanId], references: [id], onDelete: SetNull)
+
+  externalRef    String
+  status         BookingStatus @default(confirmed)
+  guestName      String
+  guestEmail     String?
+  checkIn        DateTime      @db.Date
+  checkOut       DateTime      @db.Date
+  unitsBooked    Int           @default(1)
+  currency       String        @default("USD")
+  amount         Decimal       @default(0) @db.Decimal(10, 2)
+
+  // Set when the source room could not be mapped to a local RoomType.
+  unmapped       Boolean       @default(false)
+  externalRoomId String        @default("")
+
+  rawPayload     Json
+  receivedAt     DateTime      @default(now())
+  bookedAt       DateTime?
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  nights   BookingNight[]
+
+  @@unique([sourceChannelId, externalRef])
+  @@index([propertyId, checkIn])
+  @@index([status])
+}
+
+model BookingNight {
+  id        String   @id @default(cuid())
+  bookingId String
+  booking   Booking  @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  date      DateTime @db.Date
+  units     Int      @default(1)
+
+  @@unique([bookingId, date])
+  @@index([date])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Sync engine
+// ─────────────────────────────────────────────────────────────────────────────
+
+enum SyncJobStatus {
+  pending
+  running
+  succeeded
+  failed
+  dead
+}
+
+model SyncJob {
+  id                  String            @id @default(cuid())
+  channelConnectionId String
+  channelConnection   ChannelConnection @relation(fields: [channelConnectionId], references: [id], onDelete: Cascade)
+  direction           String            // push | pull
+  entityType          String            // availability | rates | restrictions | booking_ack
+  payload             Json
+  status              SyncJobStatus     @default(pending)
+  attempts            Int               @default(0)
+  maxAttempts         Int               @default(6)
+  nextRunAt           DateTime          @default(now())
+  lastError           String?
+  dedupeKey           String?           @unique
+  createdAt           DateTime          @default(now())
+  updatedAt           DateTime          @updatedAt
+
+  logs SyncLog[]
+
+  @@index([status, nextRunAt])
+}
+
+model SyncLog {
+  id                  String            @id @default(cuid())
+  syncJobId           String?
+  syncJob             SyncJob?          @relation(fields: [syncJobId], references: [id], onDelete: SetNull)
+  channelConnectionId String?
+  channelConnection   ChannelConnection? @relation(fields: [channelConnectionId], references: [id], onDelete: SetNull)
+  direction           String
+  entityType          String
+  ok                  Boolean
+  attempt             Int      @default(1)
+  request             Json?
+  response            Json?
+  message             String   @default("")
+  durationMs          Int      @default(0)
+  createdAt           DateTime @default(now())
+
+  @@index([createdAt])
+  @@index([ok])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Conflicts / audit / settings
+// ─────────────────────────────────────────────────────────────────────────────
+
+enum ConflictStatus {
+  open
+  acknowledged
+  resolved
+}
+
+model ConflictAlert {
+  id         String         @id @default(cuid())
+  type       String         // overbooking | double_booking | rate_mismatch | orphan_mapping
+  severity   String         @default("high") // low | medium | high | critical
+  roomTypeId String?
+  roomType   RoomType?      @relation(fields: [roomTypeId], references: [id], onDelete: SetNull)
+  fromDate   DateTime?      @db.Date
+  toDate     DateTime?      @db.Date
+  bookingIds String[]
+  details    Json
+  status     ConflictStatus @default(open)
+  resolutionNote String     @default("")
+  resolvedAt DateTime?
+  createdAt  DateTime       @default(now())
+  updatedAt  DateTime       @updatedAt
+
+  @@index([status])
+  @@index([type])
+}
+
+model WebhookEvent {
+  id          String   @id @default(cuid())
+  channelCode String
+  headers     Json
+  body        Json
+  processed   Boolean  @default(false)
+  error       String?
+  createdAt   DateTime @default(now())
+
+  @@index([channelCode, createdAt])
+}
+
+model AuditLog {
+  id        String   @id @default(cuid())
+  actorId   String?
+  actor     User?    @relation(fields: [actorId], references: [id], onDelete: SetNull)
+  action    String
+  entity    String
+  entityId  String
+  before    Json?
+  after     Json?
+  createdAt DateTime @default(now())
+
+  @@index([entity, entityId])
+  @@index([createdAt])
+}
+
+model Setting {
+  key       String   @id
+  value     Json
+  updatedAt DateTime @updatedAt
+}
