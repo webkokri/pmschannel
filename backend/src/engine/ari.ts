@@ -62,7 +62,10 @@ export async function enqueueAvailabilityFanout(
 ): Promise<number> {
   if (dates.length === 0) return 0;
 
-  const room = await prisma.roomType.findUnique({ where: { id: roomTypeId }, select: { propertyId: true } });
+  const room = await prisma.roomType.findUnique({
+    where: { id: roomTypeId },
+    select: { propertyId: true, property: { select: { organizationId: true } } },
+  });
   if (!room) return 0;
 
   const connections = await prisma.channelConnection.findMany({
@@ -79,7 +82,7 @@ export async function enqueueAvailabilityFanout(
 
   let queued = 0;
   for (const conn of connections) {
-    await upsertAriJob(conn.id, 'availability', roomTypeId, dates, opts.reason);
+    await upsertAriJob(room.property.organizationId, conn.id, 'availability', roomTypeId, dates, opts.reason);
     queued++;
   }
   log.info(
@@ -95,7 +98,10 @@ export async function enqueueAriForEdit(
   dates: string[],
   entityTypes: Array<'availability' | 'rates' | 'restrictions'>,
 ): Promise<number> {
-  const room = await prisma.roomType.findUnique({ where: { id: roomTypeId }, select: { propertyId: true } });
+  const room = await prisma.roomType.findUnique({
+    where: { id: roomTypeId },
+    select: { propertyId: true, property: { select: { organizationId: true } } },
+  });
   if (!room) return 0;
 
   const connections = await prisma.channelConnection.findMany({
@@ -114,7 +120,7 @@ export async function enqueueAriForEdit(
       if (entity === 'availability' && !conn.syncAvailability) continue;
       if (entity === 'rates' && !conn.syncRates) continue;
       if (entity === 'restrictions' && !conn.syncRestrictions) continue;
-      await upsertAriJob(conn.id, entity, roomTypeId, dates, 'calendar-edit');
+      await upsertAriJob(room.property.organizationId, conn.id, entity, roomTypeId, dates, 'calendar-edit');
       queued++;
     }
   }
@@ -122,6 +128,7 @@ export async function enqueueAriForEdit(
 }
 
 async function upsertAriJob(
+  organizationId: string,
   connectionId: string,
   entityType: 'availability' | 'rates' | 'restrictions',
   roomTypeId: string,
@@ -147,6 +154,7 @@ async function upsertAriJob(
 
   await prisma.syncJob.create({
     data: {
+      organizationId,
       channelConnectionId: connectionId,
       direction: 'push',
       entityType,

@@ -117,6 +117,19 @@ export function BookingsPage() {
   );
 }
 
+interface Payment {
+  id: string;
+  amountCents: number;
+  currency: string;
+  status: string;
+  method: string;
+  commissionCents: number;
+  netCents: number;
+  refundedCents: number;
+  transferredToConnectAt: string | null;
+  createdAt: string;
+}
+
 function BookingDrawer({ id, onClose }: { id: string; onClose: () => void }) {
   const qc = useQueryClient();
   const { data, isLoading } = useQuery({
@@ -125,6 +138,10 @@ function BookingDrawer({ id, onClose }: { id: string; onClose: () => void }) {
       api<{ booking: Record<string, unknown>; conflicts: { id: string; type: string; details: { message?: string } }[] }>(
         `/bookings/${id}`,
       ),
+  });
+  const payments = useQuery({
+    queryKey: ['booking-payments', id],
+    queryFn: () => api<{ payments: Payment[]; gateway: { name: string; configured: boolean }; connectStatus: string }>(`/payments?bookingId=${id}`),
   });
 
   const setStatus = useMutation({
@@ -136,6 +153,24 @@ function BookingDrawer({ id, onClose }: { id: string; onClose: () => void }) {
   });
   const repush = useMutation({
     mutationFn: () => api(`/bookings/${id}/repush`, { method: 'POST' }),
+  });
+  const [chargeAmount, setChargeAmount] = useState('');
+  const [chargeMethod, setChargeMethod] = useState<'card' | 'cash' | 'bank_transfer' | 'other'>('card');
+  const charge = useMutation({
+    mutationFn: () =>
+      api<{ payment: Payment; gatewayMessage?: string }>('/payments', {
+        method: 'POST',
+        json: { bookingId: id, amountCents: Math.round(Number(chargeAmount) * 100), method: chargeMethod },
+      }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['booking-payments', id] });
+      setChargeAmount('');
+    },
+  });
+  const refund = useMutation({
+    mutationFn: ({ paymentId, amountCents }: { paymentId: string; amountCents: number }) =>
+      api(`/payments/${paymentId}/refund`, { method: 'POST', json: { amountCents } }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['booking-payments', id] }),
   });
 
   const b = data?.booking as
@@ -207,6 +242,81 @@ function BookingDrawer({ id, onClose }: { id: string; onClose: () => void }) {
           {repush.data ? (
             <p className="text-xs text-emerald-600">Queued {(repush.data as { jobsQueued: number }).jobsQueued} push job(s).</p>
           ) : null}
+
+          <div className="space-y-2 rounded-lg border border-slate-200 p-3 dark:border-slate-700">
+            <div className="flex items-center justify-between">
+              <p className="font-medium">Payments</p>
+              {payments.data && (
+                <span className="text-xs text-slate-500">
+                  {payments.data.connectStatus === 'active'
+                    ? 'Auto-transferring to your Stripe account'
+                    : 'Not connected to Stripe yet — funds stay on the platform until you connect'}
+                </span>
+              )}
+            </div>
+
+            {payments.isLoading && <Spinner />}
+            {payments.data && payments.data.payments.length === 0 && (
+              <p className="text-xs text-slate-500">No payments recorded for this booking.</p>
+            )}
+            {payments.data && payments.data.payments.length > 0 && (
+              <div className="space-y-2">
+                {payments.data.payments.map((p) => (
+                  <div key={p.id} className="rounded-md bg-slate-50 p-2 text-xs dark:bg-slate-800/60">
+                    <div className="flex items-center justify-between">
+                      <span className="font-medium">{money(p.amountCents / 100, p.currency)}</span>
+                      <Badge status={p.status} />
+                    </div>
+                    <p className="mt-1 text-slate-500">
+                      {p.method} · commission {money(p.commissionCents / 100, p.currency)} · net {money(p.netCents / 100, p.currency)}
+                      {p.refundedCents > 0 && ` · refunded ${money(p.refundedCents / 100, p.currency)}`}
+                    </p>
+                    {(p.status === 'captured' || p.status === 'partially_refunded') && (
+                      <button
+                        className="btn-ghost mt-1 !py-1 !text-xs"
+                        disabled={refund.isPending}
+                        onClick={() => refund.mutate({ paymentId: p.id, amountCents: p.amountCents - p.refundedCents })}
+                      >
+                        Refund remaining
+                      </button>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+
+            <form
+              className="flex flex-wrap items-end gap-2 pt-1"
+              onSubmit={(e) => {
+                e.preventDefault();
+                if (chargeAmount) charge.mutate();
+              }}
+            >
+              <div>
+                <label className="text-xs uppercase tracking-wide text-slate-400">Charge guest</label>
+                <input
+                  className="input"
+                  type="number"
+                  min="0.01"
+                  step="0.01"
+                  placeholder="Amount"
+                  value={chargeAmount}
+                  onChange={(e) => setChargeAmount(e.target.value)}
+                />
+              </div>
+              <select className="input" value={chargeMethod} onChange={(e) => setChargeMethod(e.target.value as typeof chargeMethod)}>
+                <option value="card">Card</option>
+                <option value="cash">Cash</option>
+                <option value="bank_transfer">Bank transfer</option>
+                <option value="other">Other</option>
+              </select>
+              <button className="btn-primary !py-1.5" type="submit" disabled={charge.isPending || !chargeAmount}>
+                Charge
+              </button>
+            </form>
+            {charge.data?.gatewayMessage && <p className="text-xs text-amber-600">{charge.data.gatewayMessage}</p>}
+            {charge.isError && <ErrorNote error={charge.error} />}
+          </div>
 
           <details className="rounded-lg bg-slate-50 p-3 dark:bg-slate-800/60">
             <summary className="cursor-pointer text-xs font-medium">Raw payload</summary>

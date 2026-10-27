@@ -9,6 +9,7 @@ import type {
 /** Runtime context handed to a connector for one property connection. */
 export interface ConnectorContext {
   connectionId: string;
+  organizationId: string;
   propertyId: string;
   propertyCode: string;
   channelCode: string;

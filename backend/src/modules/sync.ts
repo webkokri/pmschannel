@@ -2,16 +2,19 @@ import { Router } from 'express';
 import { prisma } from '../db';
 import { asyncHandler, notFound } from '../lib/http';
 import { requireRole } from '../auth';
+import { requireOrg } from '../lib/tenant';
 import { pollPullChannels, runDueJobs } from '../worker/job-runner';
 
 export const syncRouter = Router();
+syncRouter.use(requireOrg);
 
 syncRouter.get(
   '/jobs',
   asyncHandler(async (req, res) => {
+    const organizationId = req.user!.organizationId!;
     const status = req.query.status ? String(req.query.status).split(',') : undefined;
     const jobs = await prisma.syncJob.findMany({
-      where: { status: status ? { in: status as never[] } : undefined },
+      where: { organizationId, status: status ? { in: status as never[] } : undefined },
       orderBy: { updatedAt: 'desc' },
       take: 200,
       include: {
@@ -27,10 +30,12 @@ syncRouter.get(
 syncRouter.get(
   '/logs',
   asyncHandler(async (req, res) => {
+    const organizationId = req.user!.organizationId!;
     const q = req.query;
     const page = Math.max(1, Number(q.page ?? 1));
     const pageSize = Math.min(200, Math.max(1, Number(q.pageSize ?? 50)));
     const where = {
+      channelConnection: { organizationId },
       ok: q.ok === undefined ? undefined : q.ok === 'true',
       direction: q.direction ? String(q.direction) : undefined,
       entityType: q.entityType ? String(q.entityType) : undefined,
@@ -58,37 +63,40 @@ syncRouter.post(
   '/jobs/:id/retry',
   requireRole('manager'),
   asyncHandler(async (req, res) => {
+    const organizationId = req.user!.organizationId!;
     const job = await prisma.syncJob.findUnique({ where: { id: req.params.id } });
-    if (!job) throw notFound('Job not found');
+    if (!job || job.organizationId !== organizationId) throw notFound('Job not found');
     await prisma.syncJob.update({
       where: { id: job.id },
       data: { status: 'pending', nextRunAt: new Date(), attempts: 0, lastError: null },
     });
-    const result = await runDueJobs(1);
+    const result = await runDueJobs(1, organizationId);
     res.json({ retried: true, result });
   }),
 );
 
-/** Manually kick the worker loop (handy in dev / demos). */
+/** Manually kick the worker loop for this organization only (handy in dev / demos). */
 syncRouter.post(
   '/run',
   requireRole('manager'),
-  asyncHandler(async (_req, res) => {
-    const jobs = await runDueJobs(100);
-    const poll = await pollPullChannels();
+  asyncHandler(async (req, res) => {
+    const organizationId = req.user!.organizationId!;
+    const jobs = await runDueJobs(100, organizationId);
+    const poll = await pollPullChannels(organizationId);
     res.json({ jobs, poll });
   }),
 );
 
 syncRouter.get(
   '/health',
-  asyncHandler(async (_req, res) => {
+  asyncHandler(async (req, res) => {
+    const organizationId = req.user!.organizationId!;
     const [pending, failed, dead, succeeded24h, failed24h] = await Promise.all([
-      prisma.syncJob.count({ where: { status: 'pending' } }),
-      prisma.syncJob.count({ where: { status: 'failed' } }),
-      prisma.syncJob.count({ where: { status: 'dead' } }),
-      prisma.syncLog.count({ where: { ok: true, createdAt: { gte: since(24) } } }),
-      prisma.syncLog.count({ where: { ok: false, createdAt: { gte: since(24) } } }),
+      prisma.syncJob.count({ where: { organizationId, status: 'pending' } }),
+      prisma.syncJob.count({ where: { organizationId, status: 'failed' } }),
+      prisma.syncJob.count({ where: { organizationId, status: 'dead' } }),
+      prisma.syncLog.count({ where: { channelConnection: { organizationId }, ok: true, createdAt: { gte: since(24) } } }),
+      prisma.syncLog.count({ where: { channelConnection: { organizationId }, ok: false, createdAt: { gte: since(24) } } }),
     ]);
     res.json({ pending, failed, dead, succeeded24h, failed24h });
   }),

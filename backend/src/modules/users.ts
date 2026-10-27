@@ -2,17 +2,21 @@ import { Router } from 'express';
 import bcrypt from 'bcryptjs';
 import { z } from 'zod';
 import { prisma } from '../db';
-import { asyncHandler, parse } from '../lib/http';
+import { asyncHandler, notFound, parse } from '../lib/http';
 import { requireRole } from '../auth';
+import { requireOrg } from '../lib/tenant';
+import { assertWithinLimit } from '../lib/limits';
 import { getSettings, updateSettings } from '../lib/settings';
 
 export const usersRouter = Router();
+usersRouter.use(requireOrg);
 
 usersRouter.get(
   '/',
   requireRole('admin'),
-  asyncHandler(async (_req, res) => {
+  asyncHandler(async (req, res) => {
     const users = await prisma.user.findMany({
+      where: { organizationId: req.user!.organizationId! },
       orderBy: { createdAt: 'asc' },
       select: { id: true, email: true, name: true, role: true, active: true, createdAt: true },
     });
@@ -32,9 +36,12 @@ usersRouter.post(
   '/',
   requireRole('admin'),
   asyncHandler(async (req, res) => {
+    const organizationId = req.user!.organizationId!;
     const body = parse(userInput.extend({ password: z.string().min(8) }), req.body);
+    await assertWithinLimit(organizationId, 'users');
     const user = await prisma.user.create({
       data: {
+        organizationId,
         email: body.email.toLowerCase(),
         name: body.name,
         role: body.role,
@@ -47,10 +54,17 @@ usersRouter.post(
   }),
 );
 
+async function assertUserOwned(id: string, organizationId: string) {
+  const user = await prisma.user.findUnique({ where: { id } });
+  if (!user || user.organizationId !== organizationId) throw notFound('User not found');
+  return user;
+}
+
 usersRouter.patch(
   '/:id',
   requireRole('admin'),
   asyncHandler(async (req, res) => {
+    await assertUserOwned(req.params.id, req.user!.organizationId!);
     const body = parse(userInput.partial(), req.body);
     const data: Record<string, unknown> = {};
     if (body.email) data.email = body.email.toLowerCase();
@@ -71,6 +85,7 @@ usersRouter.delete(
   '/:id',
   requireRole('admin'),
   asyncHandler(async (req, res) => {
+    await assertUserOwned(req.params.id, req.user!.organizationId!);
     await prisma.user.delete({ where: { id: req.params.id } });
     res.status(204).end();
   }),
@@ -79,11 +94,12 @@ usersRouter.delete(
 // ── Settings (mounted here for convenience) ────────────────────────────────
 
 export const settingsRouter = Router();
+settingsRouter.use(requireOrg);
 
 settingsRouter.get(
   '/',
-  asyncHandler(async (_req, res) => {
-    res.json({ settings: await getSettings() });
+  asyncHandler(async (req, res) => {
+    res.json({ settings: await getSettings(req.user!.organizationId!) });
   }),
 );
 
@@ -104,6 +120,6 @@ settingsRouter.patch(
   requireRole('admin'),
   asyncHandler(async (req, res) => {
     const body = parse(settingsInput, req.body);
-    res.json({ settings: await updateSettings(body) });
+    res.json({ settings: await updateSettings(req.user!.organizationId!, body) });
   }),
 );

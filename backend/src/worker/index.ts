@@ -1,7 +1,9 @@
+import cron from 'node-cron';
 import { env } from '../env';
 import { logger } from '../lib/logger';
 import { prisma } from '../db';
 import { pollPullChannels, runDueJobs } from './job-runner';
+import { runNightlyPricing } from '../engine/pricing';
 
 const log = logger('worker');
 
@@ -43,10 +45,17 @@ async function main() {
   void tick();
   void pollTick();
 
+  // RMS: reprice every property/room with active pricing rules, once a night.
+  const pricingTask = cron.schedule('0 2 * * *', () => {
+    log.info('running nightly RMS pricing pass');
+    runNightlyPricing().catch((err) => log.error('nightly pricing pass failed', err));
+  });
+
   const shutdown = async () => {
     log.info('worker stopping');
     clearInterval(jobTimer);
     clearInterval(pollTimer);
+    pricingTask.stop();
     await prisma.$disconnect();
     process.exit(0);
   };

@@ -4,26 +4,30 @@ import { addDays, nightsBetween, todayIso, type NormalizedBooking } from '@cm/sh
 import { prisma } from '../db';
 import { asyncHandler, badRequest, parse } from '../lib/http';
 import { requireRole } from '../auth';
+import { requireOrg } from '../lib/tenant';
+import { getOrgSetting, setOrgSetting } from '../lib/settings';
 import { MockConnector } from '../connectors/mock/mock-connector';
 import { resolveConnection } from '../connectors/registry';
 import { ingestBooking } from '../engine/ingest';
 import { recomputeAvailability } from '../engine/ari';
 
 export const simulatorRouter = Router();
+simulatorRouter.use(requireOrg);
 
 /** List the connections available to drive from the simulator. */
 simulatorRouter.get(
   '/targets',
-  asyncHandler(async (_req, res) => {
+  asyncHandler(async (req, res) => {
+    const organizationId = req.user!.organizationId!;
     const connections = await prisma.channelConnection.findMany({
-      where: { enabled: true, roomMappings: { some: { active: true } } },
+      where: { organizationId, enabled: true, roomMappings: { some: { active: true } } },
       include: {
         channel: { select: { name: true, code: true, kind: true } },
         property: { select: { name: true, code: true } },
         _count: { select: { roomMappings: true } },
       },
     });
-    const autopilot = (await prisma.setting.findUnique({ where: { key: 'mock:autopilot' } }))?.value ?? {
+    const autopilot = (await getOrgSetting(organizationId, 'mock:autopilot')) ?? {
       enabled: false,
       lambdaByChannel: {},
     };
@@ -43,9 +47,10 @@ simulatorRouter.post(
   '/generate',
   requireRole('manager'),
   asyncHandler(async (req, res) => {
+    const organizationId = req.user!.organizationId!;
     const body = parse(generateInput, req.body);
     const conns = await prisma.channelConnection.findMany({
-      where: { id: { in: body.connectionIds } },
+      where: { id: { in: body.connectionIds }, organizationId },
       include: { channel: true },
     });
     if (conns.length === 0) throw badRequest('No matching connections');
@@ -91,13 +96,14 @@ simulatorRouter.post(
   '/overbooking',
   requireRole('manager'),
   asyncHandler(async (req, res) => {
+    const organizationId = req.user!.organizationId!;
     const body = parse(overbookInput, req.body);
 
     const roomType = body.roomTypeId
-      ? await prisma.roomType.findUnique({ where: { id: body.roomTypeId } })
+      ? await prisma.roomType.findFirst({ where: { id: body.roomTypeId, property: { organizationId } } })
       : await prisma.roomType.findFirst({
           where: {
-            propertyId: body.propertyId,
+            property: { organizationId, id: body.propertyId },
             roomMappings: { some: { active: true, channelConnection: { enabled: true } } },
           },
           orderBy: { totalUnits: 'asc' },
@@ -106,6 +112,7 @@ simulatorRouter.post(
 
     const conns = await prisma.channelConnection.findMany({
       where: {
+        organizationId,
         propertyId: roomType.propertyId,
         enabled: true,
         roomMappings: { some: { roomTypeId: roomType.id, active: true } },
@@ -187,6 +194,7 @@ simulatorRouter.post(
   '/autopilot',
   requireRole('manager'),
   asyncHandler(async (req, res) => {
+    const organizationId = req.user!.organizationId!;
     const body = parse(autopilotInput, req.body);
 
     // Convert bookings/minute → lambda per poll (poll interval defaults to 60s).
@@ -194,7 +202,7 @@ simulatorRouter.post(
     const codes =
       body.channelCodes ??
       (await prisma.channelConnection.findMany({
-        where: { enabled: true, channel: { kind: { in: ['pull', 'both'] } } },
+        where: { organizationId, enabled: true, channel: { kind: { in: ['pull', 'both'] } } },
         select: { channel: { select: { code: true } } },
       })).map((c) => c.channel.code);
 
@@ -207,22 +215,20 @@ simulatorRouter.post(
       horizonDays: body.horizonDays,
       avgStayNights: body.avgStayNights,
     };
-    await prisma.setting.upsert({
-      where: { key: 'mock:autopilot' },
-      create: { key: 'mock:autopilot', value },
-      update: { value },
-    });
+    await setOrgSetting(organizationId, 'mock:autopilot', value);
     res.json({ autopilot: value });
   }),
 );
 
-/** Remove every simulated booking and recompute availability. */
+/** Remove every simulated booking (this organization only) and recompute availability. */
 simulatorRouter.post(
   '/reset',
   requireRole('manager'),
-  asyncHandler(async (_req, res) => {
+  asyncHandler(async (req, res) => {
+    const organizationId = req.user!.organizationId!;
     const simulated = await prisma.booking.findMany({
       where: {
+        organizationId,
         OR: [
           { rawPayload: { path: ['source'], equals: 'simulator' } },
           { rawPayload: { path: ['source'], equals: 'mock-autopilot' } },
@@ -245,18 +251,14 @@ simulatorRouter.post(
 
     await prisma.booking.deleteMany({ where: { id: { in: simulated.map((b) => b.id) } } });
     await prisma.conflictAlert.deleteMany({
-      where: { details: { path: ['newBooking'], not: undefined }, status: { not: 'resolved' } },
+      where: { organizationId, details: { path: ['newBooking'], not: undefined }, status: { not: 'resolved' } },
     }).catch(() => undefined);
 
     for (const [roomTypeId, dates] of affected) {
       await recomputeAvailability(roomTypeId, [...dates]);
     }
 
-    await prisma.setting.upsert({
-      where: { key: 'mock:autopilot' },
-      create: { key: 'mock:autopilot', value: { enabled: false, lambdaByChannel: {} } },
-      update: { value: { enabled: false, lambdaByChannel: {} } },
-    });
+    await setOrgSetting(organizationId, 'mock:autopilot', { enabled: false, lambdaByChannel: {} });
 
     res.json({ deletedBookings: simulated.length, roomsRecomputed: affected.size });
   }),

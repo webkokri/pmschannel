@@ -8,9 +8,10 @@ import {
   type NormalizedBooking,
   type OtaDefinition,
 } from '@cm/shared';
-import { OTA_BY_CODE } from '@cm/shared';
+import { FULL_CHANNEL_BY_CODE } from '@cm/shared';
 import { prisma } from '../../db';
 import { logger } from '../../lib/logger';
+import { getOrgSetting } from '../../lib/settings';
 import type { Connector, ConnectorContext } from '../types';
 
 const FIRST_NAMES = ['Alex', 'Jordan', 'Sam', 'Taylor', 'Casey', 'Morgan', 'Riley', 'Jamie', 'Avery', 'Quinn', 'Devon', 'Parker'];
@@ -54,7 +55,7 @@ export class MockConnector implements Connector {
   private log = logger('mock-connector');
 
   constructor(channelCode: string) {
-    const def = OTA_BY_CODE[channelCode];
+    const def = FULL_CHANNEL_BY_CODE[channelCode];
     if (!def) throw new Error(`Unknown channel code for mock connector: ${channelCode}`);
     this.definition = def;
   }
@@ -98,9 +99,7 @@ export class MockConnector implements Connector {
   }
 
   async fetchBookings(ctx: ConnectorContext, _since: Date | null): Promise<NormalizedBooking[]> {
-    const setting = (await prisma.setting.findUnique({ where: { key: 'mock:autopilot' } }))?.value as
-      | AutopilotSetting
-      | undefined;
+    const setting = (await getOrgSetting<AutopilotSetting>(ctx.organizationId, 'mock:autopilot')) ?? undefined;
     if (!setting?.enabled) return [];
 
     const lambda = setting.lambdaByChannel[this.definition.code] ?? setting.lambdaByChannel['*'] ?? 0;

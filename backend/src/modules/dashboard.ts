@@ -2,8 +2,11 @@ import { Router } from 'express';
 import { addDays, nightsBetween, todayIso } from '@cm/shared';
 import { prisma } from '../db';
 import { asyncHandler } from '../lib/http';
+import { requireOrg } from '../lib/tenant';
+import { decryptJson } from '../lib/crypto';
 
 export const dashboardRouter = Router();
+dashboardRouter.use(requireOrg);
 
 function since(hours: number) {
   return new Date(Date.now() - hours * 3600_000);
@@ -12,8 +15,9 @@ function since(hours: number) {
 dashboardRouter.get(
   '/',
   asyncHandler(async (req, res) => {
+    const organizationId = req.user!.organizationId!;
     const propertyId = req.query.propertyId ? String(req.query.propertyId) : undefined;
-    const propFilter = propertyId ? { propertyId } : {};
+    const propFilter = { organizationId, ...(propertyId ? { propertyId } : {}) };
 
     const [
       bookings24h,
@@ -22,18 +26,25 @@ dashboardRouter.get(
       pendingJobs,
       deadJobs,
       channels,
-      connections,
+      connectionRows,
       properties,
     ] = await Promise.all([
       prisma.booking.count({ where: { ...propFilter, receivedAt: { gte: since(24) }, status: { not: 'rejected' } } }),
       prisma.booking.count({ where: { ...propFilter, receivedAt: { gte: since(24 * 7) }, status: { not: 'rejected' } } }),
-      prisma.conflictAlert.count({ where: { status: 'open' } }),
-      prisma.syncJob.count({ where: { status: { in: ['pending', 'failed'] } } }),
-      prisma.syncJob.count({ where: { status: 'dead' } }),
+      prisma.conflictAlert.count({ where: { organizationId, status: 'open' } }),
+      prisma.syncJob.count({ where: { organizationId, status: { in: ['pending', 'failed'] } } }),
+      prisma.syncJob.count({ where: { organizationId, status: 'dead' } }),
       prisma.channel.count({ where: { active: true } }),
-      prisma.channelConnection.count({ where: { ...propFilter, enabled: true } }),
-      prisma.property.count(),
+      prisma.channelConnection.findMany({ where: { ...propFilter, enabled: true }, select: { credentials: true } }),
+      prisma.property.count({ where: { organizationId } }),
     ]);
+    const connections = connectionRows.length;
+    // How many of those connections are actually talking to the real OTA/PMS vs
+    // the simulated driver — surfaced prominently so "connected" is never read as
+    // "protected" when nothing live is actually wired up yet.
+    const liveChannels = connectionRows.filter(
+      (c) => decryptJson<Record<string, unknown>>(c.credentials)?.driver === 'real',
+    ).length;
 
     // Revenue + ADR over the last 7 days (by receivedAt).
     const recentBookings = await prisma.booking.findMany({
@@ -51,7 +62,10 @@ dashboardRouter.get(
     const from = todayIso();
     const to = addDays(from, 30);
     const dateObjs = nightsBetween(from, to).map((d) => new Date(d + 'T00:00:00Z'));
-    const rooms = await prisma.roomType.findMany({ where: propFilter, select: { id: true, totalUnits: true } });
+    const rooms = await prisma.roomType.findMany({
+      where: { property: propertyId ? { id: propertyId, organizationId } : { organizationId } },
+      select: { id: true, totalUnits: true },
+    });
     const capacity = rooms.reduce((s, r) => s + r.totalUnits, 0) * dateObjs.length;
     const soldAgg = await prisma.bookingNight.aggregate({
       where: {
@@ -112,7 +126,7 @@ dashboardRouter.get(
     });
 
     const conflictFeed = await prisma.conflictAlert.findMany({
-      where: { status: 'open' },
+      where: { organizationId, status: 'open' },
       orderBy: { createdAt: 'desc' },
       take: 6,
       include: { roomType: { select: { name: true } } },
@@ -130,6 +144,7 @@ dashboardRouter.get(
         deadJobs,
         activeChannels: channels,
         connectedChannels: connections,
+        liveChannels,
         properties,
       },
       trend,

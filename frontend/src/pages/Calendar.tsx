@@ -4,6 +4,12 @@ import { api } from '@/api/client';
 import { useProperty } from '@/lib/property';
 import { Drawer, EmptyState, ErrorNote, PageHeader, Spinner } from '@/components/ui';
 
+interface ConnectedChannel {
+  enabled: boolean;
+  driver: string;
+  channel: { name: string };
+}
+
 interface Cell {
   date: string;
   price: number;
@@ -47,11 +53,22 @@ export function CalendarPage() {
     refetchInterval: 20_000,
   });
 
+  const connections = useQuery({
+    queryKey: ['connections', selectedId],
+    queryFn: () => api<{ connections: ConnectedChannel[] }>(`/channels/connections?propertyId=${selectedId}`),
+    enabled: !!selectedId,
+  });
+  const connected = (connections.data?.connections ?? []).filter((c) => c.enabled);
+
+  const [pushResult, setPushResult] = useState<{ jobsQueued: number; entityTypes: string[] } | null>(null);
   const bulk = useMutation({
-    mutationFn: (json: Record<string, unknown>) => api('/calendar', { method: 'PATCH', json }),
-    onSuccess: () => {
+    mutationFn: (json: Record<string, unknown>) =>
+      api<{ jobsQueued: number; entityTypes: string[] }>('/calendar', { method: 'PATCH', json }),
+    onSuccess: (res) => {
       qc.invalidateQueries({ queryKey: ['calendar'] });
       setEdit(null);
+      setPushResult(res);
+      setTimeout(() => setPushResult(null), 6000);
     },
   });
 
@@ -76,6 +93,26 @@ export function CalendarPage() {
           </div>
         }
       />
+
+      {connected.length > 0 && (
+        <div className="mb-3 flex flex-wrap items-center gap-1.5 text-xs text-slate-500">
+          <span>Price/availability changes here push automatically to:</span>
+          {connected.map((c, i) => (
+            <span key={i} className="badge bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300">
+              {c.channel.name}
+              {c.driver !== 'real' && <span className="ml-1 text-amber-500">(sim)</span>}
+            </span>
+          ))}
+          <span>— no need to log into any of them separately.</span>
+        </div>
+      )}
+
+      {pushResult && (
+        <div className="mb-3 rounded-lg border border-emerald-200 bg-emerald-50 p-2.5 text-sm text-emerald-700 dark:border-emerald-500/30 dark:bg-emerald-500/10 dark:text-emerald-300">
+          Queued {pushResult.jobsQueued} push{pushResult.jobsQueued === 1 ? '' : 'es'} ({pushResult.entityTypes.join(', ')}) to
+          every connected channel mapped to this room.
+        </div>
+      )}
 
       <div className="card overflow-x-auto">
         <table className="min-w-full border-separate border-spacing-0 text-sm">
@@ -157,6 +194,7 @@ export function CalendarPage() {
         days={days}
         submitting={bulk.isPending}
         onSubmit={(payload) => bulk.mutate(payload)}
+        connectedCount={connected.length}
       />
     </div>
   );
@@ -169,6 +207,7 @@ function BulkEditDrawer({
   days,
   onSubmit,
   submitting,
+  connectedCount,
 }: {
   edit: { roomTypeId: string; name: string } | null;
   onClose: () => void;
@@ -176,6 +215,7 @@ function BulkEditDrawer({
   days: number;
   onSubmit: (p: Record<string, unknown>) => void;
   submitting: boolean;
+  connectedCount: number;
 }) {
   const [rangeFrom, setRangeFrom] = useState(from);
   const [rangeTo, setRangeTo] = useState(() => {
@@ -250,7 +290,11 @@ function BulkEditDrawer({
           </div>
         </div>
         <button className="btn-primary w-full" onClick={submit} disabled={submitting}>
-          {submitting ? 'Applying & queuing pushes…' : 'Apply & push to channels'}
+          {submitting
+            ? 'Applying & queuing pushes…'
+            : connectedCount > 0
+              ? `Apply & push to ${connectedCount} connected channel${connectedCount === 1 ? '' : 's'}`
+              : 'Apply'}
         </button>
       </div>
     </Drawer>

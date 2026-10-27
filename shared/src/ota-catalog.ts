@@ -314,4 +314,5 @@ export const OTA_CATEGORIES: Record<string, string> = {
   global: 'Major global OTAs',
   north_america: 'North America focus',
   direct_misc: 'Direct & other channels',
+  pms: 'Property Management Systems',
 };

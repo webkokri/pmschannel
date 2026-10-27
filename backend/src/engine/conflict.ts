@@ -1,9 +1,13 @@
 import { nightsBetween } from '@cm/shared';
+import type { Prisma as PrismaNS } from '@prisma/client';
 import { prisma } from '../db';
 import { logger } from '../lib/logger';
 import { getSettings } from '../lib/settings';
+import { notify } from '../lib/notify/send';
 
 const log = logger('engine:conflict');
+
+type Tx = PrismaNS.TransactionClient | typeof prisma;
 
 export interface ConflictResult {
   overbooking: boolean;
@@ -13,6 +17,7 @@ export interface ConflictResult {
 
 interface BookingLike {
   id: string;
+  organizationId: string;
   roomTypeId: string | null;
   checkIn: Date;
   checkOut: Date;
@@ -27,12 +32,12 @@ interface BookingLike {
  *    auto-protect is on (so it never consumes inventory)
  *  - rate_mismatch                 → low alert; booking left as-is
  */
-export async function evaluateBooking(booking: BookingLike): Promise<ConflictResult> {
-  const settings = await getSettings();
+export async function evaluateBooking(booking: BookingLike, client: Tx = prisma): Promise<ConflictResult> {
+  const settings = await getSettings(booking.organizationId);
   const result: ConflictResult = { overbooking: false, rejected: false, alertIds: [] };
   if (!booking.roomTypeId) return result;
 
-  const room = await prisma.roomType.findUnique({ where: { id: booking.roomTypeId } });
+  const room = await client.roomType.findUnique({ where: { id: booking.roomTypeId } });
   if (!room) return result;
 
   const dates = nightsBetween(
@@ -42,7 +47,7 @@ export async function evaluateBooking(booking: BookingLike): Promise<ConflictRes
   const dateObjs = dates.map((d) => new Date(d + 'T00:00:00Z'));
 
   // Units already committed by other active bookings, per night.
-  const grouped = await prisma.bookingNight.groupBy({
+  const grouped = await client.bookingNight.groupBy({
     by: ['date'],
     where: {
       date: { in: dateObjs },
@@ -69,7 +74,7 @@ export async function evaluateBooking(booking: BookingLike): Promise<ConflictRes
     const type = room.totalUnits === 1 ? 'double_booking' : 'overbooking';
 
     // Collect the colliding bookings for the alert detail.
-    const colliding = await prisma.booking.findMany({
+    const colliding = await client.booking.findMany({
       where: {
         roomTypeId: booking.roomTypeId,
         status: { in: ['confirmed', 'modified'] },
@@ -81,12 +86,13 @@ export async function evaluateBooking(booking: BookingLike): Promise<ConflictRes
     });
 
     if (settings.autoProtectOverbooking) {
-      await prisma.booking.update({ where: { id: booking.id }, data: { status: 'rejected' } });
+      await client.booking.update({ where: { id: booking.id }, data: { status: 'rejected' } });
       result.rejected = true;
     }
 
-    const alert = await prisma.conflictAlert.create({
+    const alert = await client.conflictAlert.create({
       data: {
+        organizationId: booking.organizationId,
         type,
         severity: settings.autoProtectOverbooking ? 'high' : 'critical',
         roomTypeId: booking.roomTypeId,
@@ -112,11 +118,21 @@ export async function evaluateBooking(booking: BookingLike): Promise<ConflictRes
     log.warn(
       `${type} on room ${room.id} — booking ${booking.id} ${result.rejected ? 'REJECTED' : 'flagged'}`,
     );
+
+    // Best-effort staff alert — never blocks the ingest.
+    const org = await client.organization.findUnique({ where: { id: booking.organizationId }, select: { contactEmail: true } });
+    if (org?.contactEmail) {
+      const details = alert.details as { message: string };
+      await notify(booking.organizationId, 'overbooking_alert', {
+        email: org.contactEmail,
+        vars: { propertyName: room.name, message: details.message },
+      });
+    }
   }
 
   // ── rate mismatch ──────────────────────────────────────────────────────────
   if (settings.detectRateMismatch && !result.rejected) {
-    const days = await prisma.calendarDay.findMany({
+    const days = await client.calendarDay.findMany({
       where: { roomTypeId: booking.roomTypeId, date: { in: dateObjs } },
       select: { price: true },
     });
@@ -126,8 +142,9 @@ export async function evaluateBooking(booking: BookingLike): Promise<ConflictRes
       const delta = Math.abs(actual - expected);
       const tolerance = Math.max(settings.rateMismatchAbs, expected * settings.rateMismatchPct);
       if (expected > 0 && delta > tolerance) {
-        const alert = await prisma.conflictAlert.create({
+        const alert = await client.conflictAlert.create({
           data: {
+            organizationId: booking.organizationId,
             type: 'rate_mismatch',
             severity: 'low',
             roomTypeId: booking.roomTypeId,
@@ -156,9 +173,9 @@ export async function evaluateBooking(booking: BookingLike): Promise<ConflictRes
  * capacity and any RoomMapping that points at a deleted room. Used by the
  * "re-scan" action and after bulk imports.
  */
-export async function sweepConflicts(propertyId?: string): Promise<{ created: number }> {
+export async function sweepConflicts(organizationId: string, propertyId?: string): Promise<{ created: number }> {
   const rooms = await prisma.roomType.findMany({
-    where: propertyId ? { propertyId } : undefined,
+    where: { property: { organizationId, id: propertyId } },
     select: { id: true, name: true, totalUnits: true },
   });
   let created = 0;
@@ -180,6 +197,7 @@ export async function sweepConflicts(propertyId?: string): Promise<{ created: nu
 
     await prisma.conflictAlert.create({
       data: {
+        organizationId,
         type: room.totalUnits === 1 ? 'double_booking' : 'overbooking',
         severity: 'high',
         roomTypeId: room.id,

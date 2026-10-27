@@ -1,6 +1,7 @@
 import { nightsBetween, type NormalizedBooking } from '@cm/shared';
 import { prisma } from '../db';
 import { logger } from '../lib/logger';
+import { notify } from '../lib/notify/send';
 import { evaluateBooking } from './conflict';
 import { enqueueAvailabilityFanout, recomputeAvailability } from './ari';
 
@@ -24,7 +25,7 @@ export interface IngestOutcome {
 export async function ingestBooking(
   channelCode: string,
   b: NormalizedBooking,
-  opts: { simulated?: boolean; sourceConnectionId?: string } = {},
+  opts: { simulated?: boolean; sourceConnectionId?: string; roomTypeId?: string } = {},
 ): Promise<IngestOutcome> {
   const channel = await prisma.channel.findUnique({ where: { code: channelCode } });
   if (!channel) throw new Error(`Unknown channel code: ${channelCode}`);
@@ -40,10 +41,15 @@ export async function ingestBooking(
       where: { propertyId_channelId: { propertyId: property.id, channelId: channel.id } },
     }));
 
-  // Resolve local room type / rate plan through the mapping.
-  let roomTypeId: string | null = null;
+  // Resolve local room type / rate plan. Direct-portal bookings (and anything
+  // else that already knows the real RoomType, rather than an external code
+  // needing a RoomMapping) pass `opts.roomTypeId` straight through — without
+  // this, a guest booking through our own portal would silently never
+  // decrement availability or get conflict-checked against OTA bookings for
+  // the same room, which defeats the entire point of two-way sync.
+  let roomTypeId: string | null = opts.roomTypeId ?? null;
   let ratePlanId: string | null = null;
-  if (connection) {
+  if (!roomTypeId && connection) {
     const mapping = await prisma.roomMapping.findFirst({
       where: {
         channelConnectionId: connection.id,
@@ -67,6 +73,7 @@ export async function ingestBooking(
   });
 
   const data = {
+    organizationId: property.organizationId,
     propertyId: property.id,
     sourceChannelId: channel.id,
     roomTypeId,
@@ -86,11 +93,8 @@ export async function ingestBooking(
     bookedAt: b.bookedAt ? new Date(b.bookedAt) : null,
   };
 
-  let bookingId: string;
-  let action: IngestOutcome['action'] = 'created';
-
+  // Idempotency: identical status + dates + units → no-op.
   if (existing) {
-    // Idempotency: identical status + dates + units → no-op.
     const same =
       existing.status === b.status &&
       existing.checkIn.toISOString().slice(0, 10) === b.checkIn &&
@@ -108,25 +112,6 @@ export async function ingestBooking(
         fannedOutTo: 0,
       };
     }
-    action = 'updated';
-    await prisma.$transaction([
-      prisma.booking.update({ where: { id: existing.id }, data }),
-      prisma.bookingNight.deleteMany({ where: { bookingId: existing.id } }),
-      prisma.bookingNight.createMany({
-        data: nights.map((d) => ({ bookingId: existing.id, date: new Date(d + 'T00:00:00Z'), units: b.units })),
-      }),
-    ]);
-    bookingId = existing.id;
-  } else {
-    const created = await prisma.booking.create({
-      data: {
-        ...data,
-        nights: {
-          create: nights.map((d) => ({ date: new Date(d + 'T00:00:00Z'), units: b.units })),
-        },
-      },
-    });
-    bookingId = created.id;
   }
 
   // Which room/date ranges need availability recomputed + fan-out.
@@ -148,24 +133,71 @@ export async function ingestBooking(
     );
   }
 
-  // Conflict evaluation (may flip status → rejected).
+  let bookingId: string = existing?.id ?? '';
+  let action: IngestOutcome['action'] = 'created';
   let overbooking = false;
   let rejected = false;
   let conflictIds: string[] = [];
-  if (!unmapped && (b.status === 'confirmed' || b.status === 'modified')) {
-    const fresh = await prisma.booking.findUniqueOrThrow({ where: { id: bookingId } });
-    const evalResult = await evaluateBooking(fresh);
-    overbooking = evalResult.overbooking;
-    rejected = evalResult.rejected;
-    conflictIds = evalResult.alertIds;
-  }
 
-  // Recompute availability + fan out to the other channels.
+  /**
+   * Everything that reads or depends on "how many units are already committed for
+   * this room on these dates" runs inside one transaction, serialized per room type
+   * via a Postgres advisory lock. Without this, two bookings for the same last unit
+   * arriving at nearly the same instant (e.g. one from Booking.com, one from the
+   * direct-booking portal) could each run their capacity check before the other's
+   * write is visible, and both pass — a real double-booking the sweep job would only
+   * catch after the fact. Locks are acquired in a fixed (sorted) order across every
+   * affected room type to avoid deadlocking against another concurrent ingest that
+   * touches the same two rooms in the opposite order.
+   */
+  await prisma.$transaction(async (tx) => {
+    const roomTypeIdsToLock = [...new Set([roomTypeId, existing?.roomTypeId ?? null].filter(Boolean))].sort() as string[];
+    for (const rtId of roomTypeIdsToLock) {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${rtId}))`;
+    }
+
+    if (existing) {
+      action = 'updated';
+      await tx.booking.update({ where: { id: existing.id }, data });
+      await tx.bookingNight.deleteMany({ where: { bookingId: existing.id } });
+      await tx.bookingNight.createMany({
+        data: nights.map((d) => ({ bookingId: existing.id, date: new Date(d + 'T00:00:00Z'), units: b.units })),
+      });
+      bookingId = existing.id;
+    } else {
+      const created = await tx.booking.create({
+        data: {
+          ...data,
+          nights: {
+            create: nights.map((d) => ({ date: new Date(d + 'T00:00:00Z'), units: b.units })),
+          },
+        },
+      });
+      bookingId = created.id;
+    }
+
+    // Conflict evaluation (may flip status → rejected) — sees every other booking
+    // already committed for this room, including ones from a different channel.
+    if (!unmapped && (b.status === 'confirmed' || b.status === 'modified')) {
+      const fresh = await tx.booking.findUniqueOrThrow({ where: { id: bookingId } });
+      const evalResult = await evaluateBooking(fresh, tx);
+      overbooking = evalResult.overbooking;
+      rejected = evalResult.rejected;
+      conflictIds = evalResult.alertIds;
+    }
+
+    // Recompute availability while still holding the lock, so the number every
+    // channel gets pushed next always reflects this booking (accepted or rejected).
+    for (const [rt, dateSet] of affectedRooms) {
+      await recomputeAvailability(rt, [...dateSet].sort(), tx);
+    }
+  });
+
+  // Fan out to the other channels — outside the transaction; this only enqueues
+  // SyncJob rows (the worker does the actual push) so it doesn't need the lock.
   let fannedOutTo = 0;
   for (const [rt, dateSet] of affectedRooms) {
-    const dates = [...dateSet].sort();
-    await recomputeAvailability(rt, dates);
-    fannedOutTo += await enqueueAvailabilityFanout(rt, dates, {
+    fannedOutTo += await enqueueAvailabilityFanout(rt, [...dateSet].sort(), {
       excludeConnectionId: connection?.id,
       reason: opts.simulated ? 'simulated-booking' : `booking:${channelCode}`,
     });
@@ -176,6 +208,7 @@ export async function ingestBooking(
     await prisma.syncJob
       .create({
         data: {
+          organizationId: property.organizationId,
           channelConnectionId: connection.id,
           direction: 'push',
           entityType: 'booking_ack',
@@ -191,6 +224,25 @@ export async function ingestBooking(
     `${action} booking ${bookingId} from ${channelCode} (${b.checkIn}→${b.checkOut}) ` +
       `${unmapped ? '[UNMAPPED] ' : ''}${rejected ? '[REJECTED] ' : ''}→ fan-out ${fannedOutTo}`,
   );
+
+  // Best-effort guest notification — never blocks or fails the ingest itself. (`action`
+  // is always 'created' | 'updated' here — the 'unchanged' case already returned above.)
+  if (b.guestEmail) {
+    const effectiveStatus = rejected ? 'rejected' : b.status;
+    const vars = {
+      guestName: b.guestName,
+      propertyName: property.name,
+      checkIn: b.checkIn,
+      checkOut: b.checkOut,
+      amount: String(b.amount),
+      currency: b.currency,
+    };
+    if (effectiveStatus === 'confirmed' || effectiveStatus === 'modified') {
+      await notify(property.organizationId, 'booking_confirmation', { email: b.guestEmail, vars });
+    } else if (effectiveStatus === 'cancelled') {
+      await notify(property.organizationId, 'booking_cancelled', { email: b.guestEmail, vars });
+    }
+  }
 
   return {
     bookingId,

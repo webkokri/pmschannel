@@ -16,6 +16,8 @@ export const unauthorized = (m = 'Unauthorized') => new ApiError(401, m);
 export const forbidden = (m = 'Forbidden') => new ApiError(403, m);
 export const notFound = (m = 'Not found') => new ApiError(404, m);
 export const conflict = (m: string, d?: unknown) => new ApiError(409, m, d);
+/** Plan-limit reached — the client shows an upgrade prompt using `details`. */
+export const paymentRequired = (m: string, d?: unknown) => new ApiError(402, m, d);
 
 /** Wrap an async route handler so rejected promises reach the error middleware. */
 export function asyncHandler(

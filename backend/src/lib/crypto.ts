@@ -33,6 +33,25 @@ export function decryptJson<T = unknown>(blob: string): T | null {
   }
 }
 
+/** A random, URL-safe token — used for the inbound webhook secret, etc. */
+export function generateSecret(bytes = 24): string {
+  return crypto.randomBytes(bytes).toString('base64url');
+}
+
+/** Constant-time string comparison, so checking a caller-supplied secret against the
+ *  stored one doesn't leak how many leading characters matched via response timing. */
+export function timingSafeEqual(a: string, b: string): boolean {
+  const bufA = Buffer.from(a);
+  const bufB = Buffer.from(b);
+  if (bufA.length !== bufB.length) {
+    // Still do a constant-time comparison (against itself) so the overall function
+    // takes comparable time whether or not the lengths match.
+    crypto.timingSafeEqual(bufA, bufA);
+    return false;
+  }
+  return crypto.timingSafeEqual(bufA, bufB);
+}
+
 /** Redact secret-looking values for API responses. */
 export function redactCredentials(creds: Record<string, unknown> | null): Record<string, unknown> {
   if (!creds) return {};

@@ -2,11 +2,13 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { addDays, nightsBetween, todayIso } from '@cm/shared';
 import { prisma } from '../db';
-import { asyncHandler, badRequest, parse } from '../lib/http';
+import { asyncHandler, badRequest, notFound, parse } from '../lib/http';
 import { requireRole } from '../auth';
+import { requireOrg, assertOwned } from '../lib/tenant';
 import { enqueueAriForEdit } from '../engine/ari';
 
 export const calendarRouter = Router();
+calendarRouter.use(requireOrg);
 
 /**
  * ARI grid for a property: one row per room type, one cell per date.
@@ -17,6 +19,7 @@ calendarRouter.get(
   asyncHandler(async (req, res) => {
     const propertyId = String(req.query.propertyId ?? '');
     if (!propertyId) throw badRequest('propertyId is required');
+    await assertOwned(() => prisma.property.findUnique({ where: { id: propertyId } }), req.user!.organizationId!, 'Property');
     const from = String(req.query.from ?? todayIso());
     const days = Math.min(90, Math.max(1, Number(req.query.days ?? 30)));
     const to = addDays(from, days);
@@ -96,8 +99,11 @@ calendarRouter.patch(
     const body = parse(bulkUpdate, req.body);
     if (body.to <= body.from) throw badRequest('`to` must be after `from`');
 
-    const room = await prisma.roomType.findUnique({ where: { id: body.roomTypeId } });
-    if (!room) throw badRequest('Unknown roomTypeId');
+    const room = await prisma.roomType.findUnique({
+      where: { id: body.roomTypeId },
+      include: { property: { select: { organizationId: true } } },
+    });
+    if (!room || room.property.organizationId !== req.user!.organizationId) throw notFound('Room type not found');
 
     const allDates = nightsBetween(body.from, body.to);
     const dates = body.weekdays

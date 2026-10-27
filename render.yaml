@@ -1,0 +1,85 @@
+# Render Blueprint — one-click provisioning for Channel Manager.
+#
+# Render → New → Blueprint → connect this repo → Render reads this file and creates:
+#   - a managed PostgreSQL database
+#   - a web service (API + the built admin panel, served by the same process)
+#   - a background worker (the sync engine: drains the job queue, polls pull channels)
+#
+# See DEPLOYMENT.md for the full walkthrough, including which secrets to fill in when
+# prompted (marked `sync: false` below — Render asks for these once, at creation).
+
+databases:
+  - name: channel-manager-db
+    plan: free
+    postgresMajorVersion: "16"
+
+services:
+  - type: web
+    name: channel-manager-web
+    runtime: node
+    plan: free
+    region: oregon
+    buildCommand: npm ci && npm run build
+    # `prisma migrate deploy` runs on every deploy, before traffic is routed to the new
+    # instance — safe to run repeatedly, it only applies migrations that haven't run yet.
+    preDeployCommand: npm run -w backend prisma:migrate
+    startCommand: node backend/dist/index.js
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        fromDatabase:
+          name: channel-manager-db
+          property: connectionString
+      - key: PORT
+        value: 4000
+      - key: PUBLIC_API_URL
+        fromService:
+          type: web
+          name: channel-manager-web
+          property: host
+      - key: PUBLIC_APP_URL
+        fromService:
+          type: web
+          name: channel-manager-web
+          property: host
+      - key: JWT_SECRET
+        generateValue: true
+      - key: CM_SECRET
+        generateValue: true
+      - key: SEED_ADMIN_EMAIL
+        sync: false
+      - key: SEED_ADMIN_PASSWORD
+        sync: false
+      - key: SEED_SUPERADMIN_EMAIL
+        sync: false
+      - key: SEED_SUPERADMIN_PASSWORD
+        sync: false
+      - key: STRIPE_SECRET_KEY
+        sync: false
+      - key: STRIPE_WEBHOOK_SECRET
+        sync: false
+
+  - type: worker
+    name: channel-manager-worker
+    runtime: node
+    plan: free
+    region: oregon
+    buildCommand: npm ci && npm run build
+    startCommand: node backend/dist/worker/index.js
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        fromDatabase:
+          name: channel-manager-db
+          property: connectionString
+      - key: JWT_SECRET
+        sync: false # same value the web service generated — copy it over once, in the dashboard
+      - key: CM_SECRET
+        sync: false # same value the web service generated — copy it over once, in the dashboard
+      - key: WORKER_POLL_INTERVAL_MS
+        value: 5000
+      - key: WORKER_PULL_INTERVAL_MS
+        value: 60000

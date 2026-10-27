@@ -1,4 +1,4 @@
-import type { AriUpdate } from '@cm/shared';
+import { applyRateAdjustment, type AriUpdate } from '@cm/shared';
 import type { SyncJob } from '@prisma/client';
 import { prisma } from '../db';
 import { logger } from '../lib/logger';
@@ -6,13 +6,49 @@ import { getSettings } from '../lib/settings';
 import { resolveConnection } from '../connectors/registry';
 import { ingestBooking } from '../engine/ingest';
 
+/**
+ * Resolves a rate plan's price for a given base (room/date) price, following a
+ * `derivedFromId` chain (e.g. "Non-refundable" derives from "Flex", which derives
+ * from the room's own base rate). `maxDepth` guards against a cycle an admin
+ * could accidentally create (A derives from B derives from A) — without it, a
+ * cycle would recurse until the call stack overflows the process. `cache` avoids
+ * re-fetching the same rate plan chain once per date when a connection's
+ * mappings cover many days in one push.
+ */
+async function resolveRatePlanPrice(
+  ratePlanId: string,
+  basePrice: number,
+  cache: Map<string, { derivedFromId: string | null; adjustPct: number; adjustFlat: number } | null>,
+  maxDepth = 5,
+): Promise<number> {
+  if (maxDepth <= 0) return basePrice;
+  let plan = cache.get(ratePlanId);
+  if (plan === undefined) {
+    const row = await prisma.ratePlan.findUnique({ where: { id: ratePlanId } });
+    plan = row ? { derivedFromId: row.derivedFromId, adjustPct: row.adjustPct, adjustFlat: Number(row.adjustFlat) } : null;
+    cache.set(ratePlanId, plan);
+  }
+  if (!plan) return basePrice;
+  const parentPrice = plan.derivedFromId
+    ? await resolveRatePlanPrice(plan.derivedFromId, basePrice, cache, maxDepth - 1)
+    : basePrice;
+  return applyRateAdjustment(parentPrice, { adjustPct: plan.adjustPct, adjustFlat: plan.adjustFlat });
+}
+
 const log = logger('worker');
 
-/** Claim and process up to `limit` due sync jobs. Returns a small summary. */
-export async function runDueJobs(limit = 20): Promise<{ processed: number; ok: number; failed: number }> {
+/** Claim and process up to `limit` due sync jobs (optionally scoped to one organization). */
+export async function runDueJobs(
+  limit = 20,
+  organizationId?: string,
+): Promise<{ processed: number; ok: number; failed: number }> {
   const now = new Date();
   const due = await prisma.syncJob.findMany({
-    where: { status: { in: ['pending', 'failed'] }, nextRunAt: { lte: now } },
+    where: {
+      status: { in: ['pending', 'failed'] },
+      nextRunAt: { lte: now },
+      organizationId,
+    },
     orderBy: { nextRunAt: 'asc' },
     take: limit,
   });
@@ -100,7 +136,7 @@ async function processJob(job: SyncJob): Promise<boolean> {
     return true;
   }
 
-  const settings = await getSettings();
+  const settings = await getSettings(job.organizationId);
   const backoff = settings.retryBackoffSec;
   const attempt = job.attempts; // already incremented on claim
   if (attempt >= job.maxAttempts) {
@@ -110,6 +146,7 @@ async function processJob(job: SyncJob): Promise<boolean> {
     });
     await prisma.conflictAlert.create({
       data: {
+        organizationId: job.organizationId,
         type: 'orphan_mapping',
         severity: 'medium',
         bookingIds: [],
@@ -157,6 +194,7 @@ async function buildAriUpdates(job: SyncJob): Promise<AriUpdate[]> {
   });
   const byDate = new Map(days.map((d) => [d.date.toISOString().slice(0, 10), d]));
 
+  const ratePlanCache = new Map<string, { derivedFromId: string | null; adjustPct: number; adjustFlat: number } | null>();
   const updates: AriUpdate[] = [];
   for (const m of mappings) {
     for (const date of payload.dates) {
@@ -167,7 +205,13 @@ async function buildAriUpdates(job: SyncJob): Promise<AriUpdate[]> {
         row.availability = day.availableUnits;
         row.stopSell = day.stopSell || day.availableUnits === 0;
       } else if (job.entityType === 'rates') {
-        row.price = Number(day.price);
+        // A mapping pinned to a specific internal rate plan (e.g. "Non-refundable
+        // −10%") must push THAT plan's derived price, not the room's raw base
+        // rate — otherwise every rate plan mapped to a channel silently receives
+        // the identical price, regardless of its configured adjustment.
+        row.price = m.ratePlanId
+          ? await resolveRatePlanPrice(m.ratePlanId, Number(day.price), ratePlanCache)
+          : Number(day.price);
       } else if (job.entityType === 'restrictions') {
         row.minStay = day.minStay;
         row.maxStay = day.maxStay || undefined;
@@ -181,10 +225,12 @@ async function buildAriUpdates(job: SyncJob): Promise<AriUpdate[]> {
   return updates;
 }
 
-/** Poll pull/both channels whose interval has elapsed and ingest new bookings. */
-export async function pollPullChannels(): Promise<{ polled: number; ingested: number }> {
+/** Poll pull/both channels whose interval has elapsed and ingest new bookings
+ *  (optionally scoped to one organization). */
+export async function pollPullChannels(organizationId?: string): Promise<{ polled: number; ingested: number }> {
   const connections = await prisma.channelConnection.findMany({
     where: {
+      organizationId,
       enabled: true,
       importBookings: true,
       channel: { kind: { in: ['pull', 'both'] } },

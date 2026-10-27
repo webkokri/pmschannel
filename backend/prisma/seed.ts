@@ -1,11 +1,13 @@
 import bcrypt from 'bcryptjs';
 import { PrismaClient } from '@prisma/client';
-import { OTA_CATALOG, addDays, nightsBetween, todayIso } from '@cm/shared';
+import { DEFAULT_PLANS, FULL_CHANNEL_CATALOG, addDays, nightsBetween, todayIso } from '@cm/shared';
 
 const prisma = new PrismaClient();
 
 const ADMIN_EMAIL = process.env.SEED_ADMIN_EMAIL ?? 'admin@channelmanager.local';
 const ADMIN_PASSWORD = process.env.SEED_ADMIN_PASSWORD ?? 'admin12345';
+const SUPERADMIN_EMAIL = process.env.SEED_SUPERADMIN_EMAIL ?? 'superadmin@channelmanager.local';
+const SUPERADMIN_PASSWORD = process.env.SEED_SUPERADMIN_PASSWORD ?? 'superadmin12345';
 
 const FIRST = ['Alex', 'Jordan', 'Sam', 'Taylor', 'Casey', 'Morgan', 'Riley', 'Jamie', 'Avery', 'Quinn', 'Devon', 'Priya', 'Wei', 'Noah', 'Emma'];
 const LAST = ['Nguyen', 'Patel', 'Smith', 'Tremblay', 'Garcia', 'Kim', 'Brown', 'Roy', 'Wilson', 'Martin', 'Lee', 'Cote', 'Singh', 'Dubois'];
@@ -15,11 +17,96 @@ const randInt = (min: number, max: number) => Math.floor(Math.random() * (max - 
 async function main() {
   console.log('Seeding channel manager…');
 
-  // ── Users ────────────────────────────────────────────────────────────────
+  // ── Platform: plans ──────────────────────────────────────────────────────
+  for (const p of DEFAULT_PLANS) {
+    await prisma.plan.upsert({
+      where: { code: p.code },
+      update: {
+        name: p.name,
+        description: p.description,
+        priceMonthlyCents: p.priceMonthlyCents,
+        priceYearlyCents: p.priceYearlyCents,
+        limits: p.limits as object,
+        sortOrder: p.sortOrder,
+      },
+      create: {
+        code: p.code,
+        name: p.name,
+        description: p.description,
+        priceMonthlyCents: p.priceMonthlyCents,
+        priceYearlyCents: p.priceYearlyCents,
+        limits: p.limits as object,
+        sortOrder: p.sortOrder,
+      },
+    });
+  }
+  const enterprisePlan = await prisma.plan.findUniqueOrThrow({ where: { code: 'enterprise' } });
+
+  // ── Platform: super admin ────────────────────────────────────────────────
   await prisma.user.upsert({
-    where: { email: ADMIN_EMAIL.toLowerCase() },
+    where: { email: SUPERADMIN_EMAIL.toLowerCase() },
     update: {},
     create: {
+      email: SUPERADMIN_EMAIL.toLowerCase(),
+      name: 'Platform Super Admin',
+      role: 'admin',
+      isSuperAdmin: true,
+      passwordHash: await bcrypt.hash(SUPERADMIN_PASSWORD, 10),
+    },
+  });
+
+  // ── Platform: dedicated support manager pool ────────────────────────────
+  const supportStaff = [
+    { email: 'priya.support@channelmanager.local', name: 'Priya Chandran' },
+    { email: 'marcus.support@channelmanager.local', name: 'Marcus Bell' },
+  ];
+  for (const s of supportStaff) {
+    await prisma.user.upsert({
+      where: { email: s.email },
+      update: {},
+      create: {
+        email: s.email,
+        name: s.name,
+        role: 'viewer',
+        isSupportManager: true,
+        passwordHash: await bcrypt.hash('support12345', 10),
+      },
+    });
+  }
+  const firstSupportManager = await prisma.user.findUniqueOrThrow({ where: { email: supportStaff[0].email } });
+
+  // ── Tenant: "Demo Hotels" organization ───────────────────────────────────
+  const org = await prisma.organization.upsert({
+    where: { slug: 'demo-hotels' },
+    update: {},
+    create: {
+      name: 'Demo Hotels',
+      slug: 'demo-hotels',
+      contactEmail: ADMIN_EMAIL.toLowerCase(),
+      country: 'US',
+      currency: 'USD',
+      status: 'active',
+      supportManagerId: firstSupportManager.id,
+      supportManagerAssignedAt: new Date(),
+    },
+  });
+  await prisma.subscription.upsert({
+    where: { organizationId: org.id },
+    update: { planId: enterprisePlan.id, status: 'active' },
+    create: {
+      organizationId: org.id,
+      planId: enterprisePlan.id,
+      status: 'active',
+      currentPeriodEnd: new Date(addDays(todayIso(), 365) + 'T00:00:00Z'),
+    },
+  });
+
+  // ── Tenant users ─────────────────────────────────────────────────────────
+  await prisma.user.upsert({
+    where: { email: ADMIN_EMAIL.toLowerCase() },
+    update: { organizationId: org.id },
+    create: {
+      organizationId: org.id,
       email: ADMIN_EMAIL.toLowerCase(),
       name: 'Admin',
       role: 'admin',
@@ -28,8 +115,9 @@ async function main() {
   });
   await prisma.user.upsert({
     where: { email: 'manager@channelmanager.local' },
-    update: {},
+    update: { organizationId: org.id },
     create: {
+      organizationId: org.id,
       email: 'manager@channelmanager.local',
       name: 'Property Manager',
       role: 'manager',
@@ -37,8 +125,8 @@ async function main() {
     },
   });
 
-  // ── Channels (from the shared catalogue) ─────────────────────────────────
-  for (const def of OTA_CATALOG) {
+  // ── Channels + PMS integrations (platform-global catalogue) ──────────────
+  for (const def of FULL_CHANNEL_CATALOG) {
     await prisma.channel.upsert({
       where: { code: def.code },
       update: {
@@ -67,7 +155,7 @@ async function main() {
   const channels = await prisma.channel.findMany();
   const channelByCode = Object.fromEntries(channels.map((c) => [c.code, c]));
 
-  // ── Properties + rooms + rate plans ─────────────────────────────────────
+  // ── Properties + rooms + rate plans (all owned by "Demo Hotels") ─────────
   const propertySpecs = [
     {
       code: 'SEASIDE',
@@ -78,9 +166,9 @@ async function main() {
       timezone: 'America/Los_Angeles',
       currency: 'USD',
       rooms: [
-        { code: 'KING', name: 'King Room', totalUnits: 6, base: 189 },
-        { code: 'QUEEN2', name: 'Double Queen', totalUnits: 5, base: 209 },
-        { code: 'SUITE', name: 'Ocean Suite', totalUnits: 2, base: 349 },
+        { code: 'KING', name: 'King Room', totalUnits: 6, base: 189, category: 'standard' as const },
+        { code: 'QUEEN2', name: 'Double Queen', totalUnits: 5, base: 209, category: 'deluxe' as const },
+        { code: 'SUITE', name: 'Ocean Suite', totalUnits: 2, base: 349, category: 'suite' as const },
       ],
     },
     {
@@ -92,9 +180,9 @@ async function main() {
       timezone: 'America/Edmonton',
       currency: 'CAD',
       rooms: [
-        { code: 'LODGE-Q', name: 'Lodge Queen', totalUnits: 8, base: 165 },
-        { code: 'CABIN-2BR', name: '2-Bedroom Cabin', totalUnits: 4, base: 295 },
-        { code: 'CABIN-LOFT', name: 'Loft Cabin', totalUnits: 1, base: 259 },
+        { code: 'LODGE-Q', name: 'Lodge Queen', totalUnits: 8, base: 165, category: 'standard' as const },
+        { code: 'CABIN-2BR', name: '2-Bedroom Cabin', totalUnits: 4, base: 295, category: 'family' as const },
+        { code: 'CABIN-LOFT', name: 'Loft Cabin', totalUnits: 1, base: 259, category: 'suite' as const },
       ],
     },
     {
@@ -106,8 +194,8 @@ async function main() {
       timezone: 'America/Chicago',
       currency: 'USD',
       rooms: [
-        { code: 'STUDIO', name: 'Studio Apartment', totalUnits: 10, base: 149 },
-        { code: '1BR', name: 'One-Bedroom Apartment', totalUnits: 7, base: 199 },
+        { code: 'STUDIO', name: 'Studio Apartment', totalUnits: 10, base: 149, category: 'standard' as const },
+        { code: '1BR', name: 'One-Bedroom Apartment', totalUnits: 7, base: 199, category: 'deluxe' as const },
       ],
     },
   ];
@@ -117,8 +205,9 @@ async function main() {
   for (const spec of propertySpecs) {
     const property = await prisma.property.upsert({
       where: { code: spec.code },
-      update: { name: spec.name },
+      update: { name: spec.name, organizationId: org.id },
       create: {
+        organizationId: org.id,
         code: spec.code,
         name: spec.name,
         address: '100 Main St',
@@ -133,11 +222,12 @@ async function main() {
     for (const r of spec.rooms) {
       const room = await prisma.roomType.upsert({
         where: { propertyId_code: { propertyId: property.id, code: r.code } },
-        update: { name: r.name, totalUnits: r.totalUnits, basePrice: r.base },
+        update: { name: r.name, totalUnits: r.totalUnits, basePrice: r.base, category: r.category },
         create: {
           propertyId: property.id,
           code: r.code,
           name: r.name,
+          category: r.category,
           totalUnits: r.totalUnits,
           basePrice: r.base,
           maxOccupancy: r.code.includes('SUITE') || r.code.includes('CABIN') ? 4 : 2,
@@ -197,7 +287,14 @@ async function main() {
 
   // ── Connections + room mappings for a handful of channels ───────────────
   const connectedCodes = ['booking_com', 'expedia', 'airbnb', 'direct_web', 'vrbo'];
-  const properties = await prisma.property.findMany({ include: { roomTypes: true } });
+  const commissionByCode: Record<string, number> = {
+    booking_com: 15,
+    expedia: 18,
+    airbnb: 14,
+    vrbo: 8,
+    direct_web: 0,
+  };
+  const properties = await prisma.property.findMany({ where: { organizationId: org.id }, include: { roomTypes: true } });
 
   for (const property of properties) {
     for (const code of connectedCodes) {
@@ -205,14 +302,16 @@ async function main() {
       if (!channel) continue;
       const connection = await prisma.channelConnection.upsert({
         where: { propertyId_channelId: { propertyId: property.id, channelId: channel.id } },
-        update: { enabled: true, status: 'connected' },
+        update: { enabled: true, status: 'connected', commissionPct: commissionByCode[code] ?? 0 },
         create: {
+          organizationId: org.id,
           propertyId: property.id,
           channelId: channel.id,
           enabled: true,
           status: 'connected',
           credentials: '', // mock driver — no secrets needed
           pullIntervalSec: 60,
+          commissionPct: commissionByCode[code] ?? 0,
         },
       });
       for (const room of property.roomTypes) {
@@ -253,6 +352,7 @@ async function main() {
     try {
       const booking = await prisma.booking.create({
         data: {
+          organizationId: org.id,
           propertyId: room.propertyId,
           sourceChannelId: channel.id,
           roomTypeId: room.id,
@@ -300,6 +400,7 @@ async function main() {
       await prisma.booking
         .create({
           data: {
+            organizationId: org.id,
             propertyId: loft.propertyId,
             sourceChannelId: ch.id,
             roomTypeId: loft.id,
@@ -325,6 +426,7 @@ async function main() {
     });
     await prisma.conflictAlert.create({
       data: {
+        organizationId: org.id,
         type: 'double_booking',
         severity: 'critical',
         roomTypeId: loft.id,
@@ -339,15 +441,133 @@ async function main() {
     });
   }
 
+  // ── Room units (PMS) — a few physical units per room type at Seaside ────
+  const seaside = properties.find((p) => p.code === 'SEASIDE')!;
+  for (const room of seaside.roomTypes) {
+    for (let i = 1; i <= Math.min(3, room.totalUnits); i++) {
+      await prisma.roomUnit.upsert({
+        where: { roomTypeId_unitNumber: { roomTypeId: room.id, unitNumber: `${room.code}-${100 + i}` } },
+        update: {},
+        create: {
+          roomTypeId: room.id,
+          unitNumber: `${room.code}-${100 + i}`,
+          housekeepingStatus: i === 1 ? 'dirty' : 'clean',
+        },
+      });
+    }
+  }
+
+  // ── Finance: a few sample expenses at Seaside ───────────────────────────
+  const existingExpenses = await prisma.expense.count({ where: { propertyId: seaside.id } });
+  if (existingExpenses === 0) {
+    await prisma.expense.createMany({
+      data: [
+        { organizationId: org.id, propertyId: seaside.id, category: 'utilities', amountCents: 42000, incurredAt: new Date(addDays(start, -10) + 'T00:00:00Z'), vendor: 'City Power & Water', note: 'Monthly utilities' },
+        { organizationId: org.id, propertyId: seaside.id, category: 'payroll', amountCents: 850000, incurredAt: new Date(addDays(start, -7) + 'T00:00:00Z'), vendor: 'Payroll', note: 'Front desk + housekeeping' },
+        { organizationId: org.id, propertyId: seaside.id, category: 'maintenance', amountCents: 18500, incurredAt: new Date(addDays(start, -3) + 'T00:00:00Z'), vendor: 'Ace Repairs', note: 'HVAC service' },
+      ],
+    });
+  }
+
+  // ── A guest-facing package ───────────────────────────────────────────────
+  const oceanSuite = seaside.roomTypes.find((r) => r.code === 'SUITE');
+  if (oceanSuite) {
+    const existingPackage = await prisma.package.findFirst({ where: { propertyId: seaside.id, name: 'Honeymoon Package' } });
+    if (!existingPackage) {
+      await prisma.package.create({
+        data: {
+          organizationId: org.id,
+          propertyId: seaside.id,
+          roomTypeId: oceanSuite.id,
+          name: 'Honeymoon Package',
+          description: 'Ocean Suite + champagne, breakfast in bed, and a late 2pm checkout.',
+          priceAdjustType: 'flat',
+          priceValue: 75,
+          includedAddons: ['Champagne on arrival', 'Breakfast in bed', 'Late checkout (2pm)'],
+        },
+      });
+    }
+  }
+
+  // ── RMS: a couple of pricing rules for Seaside ───────────────────────────
+  const existingRules = await prisma.pricingRule.count({ where: { propertyId: seaside.id } });
+  if (existingRules === 0) {
+    await prisma.pricingRule.createMany({
+      data: [
+        {
+          organizationId: org.id,
+          propertyId: seaside.id,
+          name: 'Weekend premium',
+          type: 'day_of_week',
+          conditions: { weekdays: [5, 6] },
+          adjustPct: 15,
+          priority: 1,
+        },
+        {
+          organizationId: org.id,
+          propertyId: seaside.id,
+          name: 'High demand surcharge',
+          type: 'occupancy_based',
+          conditions: { minOccupancyPct: 80, maxOccupancyPct: 100 },
+          adjustPct: 10,
+          priority: 2,
+        },
+        {
+          organizationId: org.id,
+          propertyId: seaside.id,
+          name: 'Last-minute discount',
+          type: 'lead_time',
+          conditions: { maxDaysOut: 2, minDaysOut: 0 },
+          adjustPct: -10,
+          priority: 3,
+        },
+      ],
+    });
+  }
+
+  // ── SEO / GEO / AEO — publish Seaside's public microsite ────────────────
+  await prisma.propertySeo.upsert({
+    where: { propertyId: seaside.id },
+    update: {},
+    create: {
+      propertyId: seaside.id,
+      metaTitle: 'Seaside Boutique Hotel — San Diego Ocean-View Rooms',
+      metaDescription: 'Book direct at Seaside Boutique Hotel in San Diego — ocean-view rooms and suites, best-rate guarantee, free cancellation.',
+      keywords: ['san diego hotel', 'ocean view hotel san diego', 'boutique hotel california'],
+      published: true,
+    },
+  });
+  const faqCount = await prisma.propertyFaq.count({ where: { propertyId: seaside.id } });
+  if (faqCount === 0) {
+    await prisma.propertyFaq.createMany({
+      data: [
+        { propertyId: seaside.id, question: 'What time is check-in and check-out?', answer: 'Check-in is from 3:00 PM and check-out is by 11:00 AM. Late checkout may be available on request.', sortOrder: 1 },
+        { propertyId: seaside.id, question: 'Is parking available?', answer: 'Yes, complimentary self-parking is available for all overnight guests.', sortOrder: 2 },
+        { propertyId: seaside.id, question: 'Do you allow pets?', answer: 'We welcome dogs under 50 lbs in select rooms for a nightly pet fee — please let us know in advance.', sortOrder: 3 },
+      ],
+    });
+  }
+
+  // ── Staff: give the seeded manager finance + notifications permissions ──
+  await prisma.user.updateMany({
+    where: { organizationId: org.id, email: 'manager@channelmanager.local' },
+    data: { permissions: ['finance.manage', 'notifications.manage'], title: 'Operations Manager', department: 'Operations' },
+  });
+
   // ── Default settings + autopilot off ───────────────────────────────────
   await prisma.setting.upsert({
-    where: { key: 'mock:autopilot' },
+    where: { organizationId_key: { organizationId: org.id, key: 'mock:autopilot' } },
     update: {},
-    create: { key: 'mock:autopilot', value: { enabled: false, lambdaByChannel: {}, horizonDays: 45, avgStayNights: 2 } },
+    create: {
+      organizationId: org.id,
+      key: 'mock:autopilot',
+      value: { enabled: false, lambdaByChannel: {}, horizonDays: 45, avgStayNights: 2 },
+    },
   });
 
   console.log(`Done. ${made} historical bookings, ${createdRooms.length} room types, ${channels.length} channels.`);
-  console.log(`Login: ${ADMIN_EMAIL} / ${ADMIN_PASSWORD}`);
+  console.log(`Org admin login:   ${ADMIN_EMAIL} / ${ADMIN_PASSWORD}`);
+  console.log(`Super admin login: ${SUPERADMIN_EMAIL} / ${SUPERADMIN_PASSWORD}`);
 }
 
 main()

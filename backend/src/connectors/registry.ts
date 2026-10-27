@@ -46,6 +46,7 @@ export async function resolveConnection(connectionId: string): Promise<ResolvedC
 
   const ctx: ConnectorContext = {
     connectionId: conn.id,
+    organizationId: conn.organizationId,
     propertyId: conn.propertyId,
     propertyCode: conn.property.code,
     channelCode: conn.channel.code,

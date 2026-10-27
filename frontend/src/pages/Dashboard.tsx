@@ -29,6 +29,7 @@ interface DashboardData {
     deadJobs: number;
     activeChannels: number;
     connectedChannels: number;
+    liveChannels: number;
     properties: number;
   };
   trend: { date: string; bookings: number; revenue: number }[];
@@ -78,7 +79,21 @@ export function DashboardPage() {
           tone={k.openConflicts > 0 ? 'bad' : 'good'}
           sub={<Link className="underline" to="/conflicts">review</Link>}
         />
-        <StatCard label="Connected channels" value={`${k.connectedChannels}`} sub={`${k.activeChannels} in catalogue`} />
+        <StatCard
+          label="Connected channels"
+          value={`${k.connectedChannels}`}
+          tone={k.connectedChannels > 0 && k.liveChannels === 0 ? 'warn' : 'default'}
+          sub={
+            k.connectedChannels === 0 ? (
+              `${k.activeChannels} in catalogue`
+            ) : (
+              <>
+                <Link className="underline" to="/channels">{k.liveChannels} live</Link>
+                {k.liveChannels < k.connectedChannels && `, ${k.connectedChannels - k.liveChannels} simulated`}
+              </>
+            )
+          }
+        />
         <StatCard
           label="Pending sync jobs"
           value={k.pendingJobs}

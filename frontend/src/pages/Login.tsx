@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { Wordmark } from '@/assets/logo';
 import { useAuth } from '@/lib/auth';
 
@@ -53,6 +53,12 @@ export function LoginPage() {
         </form>
         <p className="mt-5 text-center text-xs text-slate-400">
           Seeded demo: admin@channelmanager.local / admin12345
+        </p>
+        <p className="mt-2 text-center text-sm">
+          New hotel or property?{' '}
+          <Link to="/signup" className="font-medium text-brand-500 underline">
+            Start your free trial
+          </Link>
         </p>
       </div>
     </div>

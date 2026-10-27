@@ -50,6 +50,13 @@ export const STATUS_COLORS: Record<string, string> = {
   medium: 'bg-amber-100 text-amber-700 dark:bg-amber-500/15 dark:text-amber-300',
   high: 'bg-orange-100 text-orange-700 dark:bg-orange-500/15 dark:text-orange-300',
   critical: 'bg-rose-100 text-rose-700 dark:bg-rose-500/15 dark:text-rose-300',
+  active: 'bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300',
+  onboarding: 'bg-sky-100 text-sky-700 dark:bg-sky-500/15 dark:text-sky-300',
+  restricted: 'bg-rose-100 text-rose-700 dark:bg-rose-500/15 dark:text-rose-300',
+  not_started: 'bg-slate-200 text-slate-600 dark:bg-slate-700 dark:text-slate-300',
+  captured: 'bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300',
+  partially_refunded: 'bg-amber-100 text-amber-700 dark:bg-amber-500/15 dark:text-amber-300',
+  refunded: 'bg-slate-200 text-slate-600 dark:bg-slate-700 dark:text-slate-300',
 };
 
 export function statusBadge(status: string) {

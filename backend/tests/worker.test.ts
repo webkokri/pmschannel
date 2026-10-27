@@ -39,7 +39,7 @@ vi.mock('../src/connectors/registry', () => ({
 import { prisma } from '../src/db';
 import { cleanWorld, isoDate, makeWorld } from './helpers';
 import { runDueJobs } from '../src/worker/job-runner';
-import { enqueueAvailabilityFanout, recomputeAvailability } from '../src/engine/ari';
+import { enqueueAriForEdit, enqueueAvailabilityFanout, recomputeAvailability } from '../src/engine/ari';
 
 let world: Awaited<ReturnType<typeof makeWorld>>;
 let target: string; // airbnb connection id — the one we assert on
@@ -148,5 +148,44 @@ describe('sync worker', () => {
       where: { type: 'orphan_mapping', details: { path: ['jobId'], equals: job.id } },
     });
     expect(alert).toBeTruthy();
+  });
+
+  it('pushes a rate-plan-derived price, not the raw base price, for a mapping pinned to that plan', async () => {
+    const date = isoDate(9);
+    await prisma.calendarDay.upsert({
+      where: { roomTypeId_date: { roomTypeId: world.room.id, date: new Date(date + 'T00:00:00Z') } },
+      create: { roomTypeId: world.room.id, date: new Date(date + 'T00:00:00Z'), price: 200, availableUnits: 3 },
+      update: { price: 200 },
+    });
+
+    const ratePlan = await prisma.ratePlan.create({
+      data: { roomTypeId: world.room.id, code: 'NONREF', name: 'Non-refundable', adjustPct: -10, adjustFlat: 0 },
+    });
+    // A second mapping on the SAME connection + room, pinned to the discounted
+    // rate plan — this is what "non-refundable sells for 10% less on Airbnb"
+    // actually means in the data model.
+    await prisma.roomMapping.create({
+      data: {
+        channelConnectionId: target,
+        roomTypeId: world.room.id,
+        ratePlanId: ratePlan.id,
+        externalRoomId: 'airbnb-R1-NONREF',
+        externalRatePlanId: 'airbnb-nonref',
+      },
+    });
+
+    let captured: { externalRoomId: string; price?: number }[] = [];
+    state.pushImpl = async (_ctx, updates) => {
+      captured = updates as typeof captured;
+      return { ok: true, accepted: updates.length, rejected: 0 };
+    };
+
+    await enqueueAriForEdit(world.room.id, [date], ['rates']);
+    await runDueJobs(50);
+
+    const base = captured.find((r) => r.externalRoomId === 'airbnb-R1');
+    const nonRef = captured.find((r) => r.externalRoomId === 'airbnb-R1-NONREF');
+    expect(base?.price).toBe(200);
+    expect(nonRef?.price).toBe(180); // 200 × (1 − 10%)
   });
 });

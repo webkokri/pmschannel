@@ -1,9 +1,9 @@
 import { useMemo, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '@/api/client';
 import { useProperty } from '@/lib/property';
-import { Badge, ErrorNote, PageHeader, Spinner } from '@/components/ui';
+import { Badge, ErrorNote, LimitBanner, PageHeader, Spinner } from '@/components/ui';
 import { timeAgo } from '@/lib/format';
 
 interface Channel {
@@ -36,7 +36,8 @@ interface Connection {
 export function ChannelsPage() {
   const { selectedId } = useProperty();
   const qc = useQueryClient();
-  const [tab, setTab] = useState<string>('all');
+  const [params] = useSearchParams();
+  const [tab, setTab] = useState<string>(params.get('tab') ?? 'all');
 
   const catalogue = useQuery({
     queryKey: ['channels'],
@@ -80,11 +81,37 @@ export function ChannelsPage() {
   const categories = catalogue.data!.categories;
   const channels = catalogue.data!.channels.filter((c) => tab === 'all' || c.category === tab);
 
+  const enabledConns = (connections.data?.connections ?? []).filter((c) => c.enabled);
+  const liveCount = enabledConns.filter((c) => c.driver === 'real').length;
+  const simulatedCount = enabledConns.length - liveCount;
+
   return (
     <div>
+      {enabledConns.length > 0 && (
+        <div
+          className={`mb-4 rounded-lg border p-3 text-sm ${
+            simulatedCount > 0
+              ? 'border-amber-200 bg-amber-50 text-amber-800 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-300'
+              : 'border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-500/30 dark:bg-emerald-500/10 dark:text-emerald-300'
+          }`}
+        >
+          {simulatedCount > 0 ? (
+            <>
+              <b>{simulatedCount}</b> of {enabledConns.length} connected channel{enabledConns.length === 1 ? '' : 's'} on this
+              property {simulatedCount === 1 ? 'is' : 'are'} still running on the <b>simulated driver</b> — no real calls to
+              that OTA/PMS are happening, so overbooking protection against it is not actually live yet. Open{' '}
+              <b>Configure</b> on a channel, save real credentials, and switch its driver to "Real" once you've verified it
+              with <b>Test</b>.
+              {liveCount > 0 && <> {liveCount} channel{liveCount === 1 ? '' : 's'} on this property {liveCount === 1 ? 'is' : 'are'} live.</>}
+            </>
+          ) : (
+            <>All {liveCount} connected channel{liveCount === 1 ? '' : 's'} on this property are running on the real driver.</>
+          )}
+        </div>
+      )}
       <PageHeader
         title="Channels"
-        subtitle="Connect OTAs for the selected property. In this environment every channel runs on the built-in mock driver."
+        subtitle="Connect OTAs and third-party PMS platforms (WebRezPro, AutoClerk, Jonas Chorum, Mews and more) for the selected property. New connections run on the mock driver until you save real credentials and switch the driver in Configure."
       />
 
       <div className="mb-4 flex flex-wrap gap-1.5">
@@ -100,6 +127,8 @@ export function ChannelsPage() {
           </button>
         ))}
       </div>
+
+      {(connect.error || toggle.error) && <div className="mb-3"><LimitBanner error={connect.error ?? toggle.error} /></div>}
 
       {test.data && (
         <div
@@ -126,7 +155,18 @@ export function ChannelsPage() {
                   </p>
                 </div>
                 {conn ? (
-                  <Badge status={conn.status} />
+                  <div className="flex flex-col items-end gap-1">
+                    <Badge status={conn.status} />
+                    <span
+                      className={`badge ${
+                        conn.driver === 'real'
+                          ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300'
+                          : 'bg-amber-100 text-amber-700 dark:bg-amber-500/15 dark:text-amber-300'
+                      }`}
+                    >
+                      {conn.driver === 'real' ? 'live' : 'simulated'}
+                    </span>
+                  </div>
                 ) : (
                   <span className="badge bg-slate-200 text-slate-500 dark:bg-slate-700 dark:text-slate-300">
                     not connected
@@ -152,10 +192,12 @@ export function ChannelsPage() {
                       {conn.lastPushAt && <> · pushed {timeAgo(conn.lastPushAt)}</>}
                       {conn.lastError && <div className="text-rose-500">{conn.lastError}</div>}
                     </>
-                  ) : (
+                  ) : ch.docsUrl && !['internal', 'vendor-provided'].includes(ch.docsUrl) ? (
                     <a href={ch.docsUrl} target="_blank" rel="noreferrer" className="underline">
                       docs
                     </a>
+                  ) : (
+                    <span>{ch.docsUrl === 'vendor-provided' ? 'ask your PMS account rep for API docs' : ' '}</span>
                   )}
                 </div>
                 <div className="flex gap-1.5">

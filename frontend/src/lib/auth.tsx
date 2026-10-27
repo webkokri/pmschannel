@@ -6,12 +6,16 @@ export interface User {
   email: string;
   name: string;
   role: 'admin' | 'manager' | 'viewer';
+  organizationId: string | null;
+  isSuperAdmin: boolean;
+  impersonated?: boolean;
 }
 
 interface AuthState {
   user: User | null;
   loading: boolean;
   login: (email: string, password: string) => Promise<void>;
+  loginWithToken: (token: string, user: User) => void;
   logout: () => void;
 }
 
@@ -37,13 +41,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUser(r.user);
   };
 
+  const loginWithToken = (token: string, nextUser: User) => {
+    setToken(token);
+    setUser(nextUser);
+  };
+
   const logout = () => {
     setToken(null);
     setUser(null);
     location.assign('/login');
   };
 
-  return <AuthContext.Provider value={{ user, loading, login, logout }}>{children}</AuthContext.Provider>;
+  return (
+    <AuthContext.Provider value={{ user, loading, login, loginWithToken, logout }}>{children}</AuthContext.Provider>
+  );
 }
 
 export const useAuth = () => useContext(AuthContext);

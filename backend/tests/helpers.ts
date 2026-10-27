@@ -1,17 +1,17 @@
 import { prisma } from '../src/db';
-import { OTA_CATALOG } from '@cm/shared';
+import { FULL_CHANNEL_CATALOG, DEFAULT_PLANS } from '@cm/shared';
 
 export const PREFIX = `test_${Date.now().toString(36)}`;
 
-/** Minimal world: 1 property, 1 room (capacity configurable), 2 mock channels
- *  each mapped to the room, calendar seeded for 30 days. */
+/** Minimal world: 1 organization (Enterprise plan), 1 property, 1 room (capacity
+ *  configurable), 2 mock channels each mapped to the room, calendar seeded for 30 days. */
 export async function makeWorld(opts: { capacity?: number; channels?: string[] } = {}) {
   const capacity = opts.capacity ?? 2;
   const channelCodes = opts.channels ?? ['booking_com', 'airbnb'];
 
   // Channels come from the catalogue — upsert the ones we need.
   for (const code of channelCodes) {
-    const def = OTA_CATALOG.find((o) => o.code === code)!;
+    const def = FULL_CHANNEL_CATALOG.find((o) => o.code === code)!;
     await prisma.channel.upsert({
       where: { code },
       update: {},
@@ -29,8 +29,37 @@ export async function makeWorld(opts: { capacity?: number; channels?: string[] }
     });
   }
 
+  // A permissive plan so limit checks never interfere with unrelated engine tests.
+  const enterprise = DEFAULT_PLANS.find((p) => p.code === 'enterprise')!;
+  const plan = await prisma.plan.upsert({
+    where: { code: enterprise.code },
+    update: {},
+    create: {
+      code: enterprise.code,
+      name: enterprise.name,
+      description: enterprise.description,
+      priceMonthlyCents: enterprise.priceMonthlyCents,
+      priceYearlyCents: enterprise.priceYearlyCents,
+      limits: enterprise.limits as object,
+      sortOrder: enterprise.sortOrder,
+    },
+  });
+
+  const organization = await prisma.organization.create({
+    data: { name: `${PREFIX} Org`, slug: `${PREFIX}-org`, contactEmail: 'test@example.com', status: 'active' },
+  });
+  await prisma.subscription.create({
+    data: { organizationId: organization.id, planId: plan.id, status: 'active' },
+  });
+
   const property = await prisma.property.create({
-    data: { code: `${PREFIX}_P`, name: `${PREFIX} Property`, country: 'US', currency: 'USD' },
+    data: {
+      organizationId: organization.id,
+      code: `${PREFIX}_P`,
+      name: `${PREFIX} Property`,
+      country: 'US',
+      currency: 'USD',
+    },
   });
   const room = await prisma.roomType.create({
     data: { propertyId: property.id, code: 'R1', name: 'Test Room', totalUnits: capacity, basePrice: 100 },
@@ -40,7 +69,13 @@ export async function makeWorld(opts: { capacity?: number; channels?: string[] }
   for (const code of channelCodes) {
     const channel = await prisma.channel.findUniqueOrThrow({ where: { code } });
     const conn = await prisma.channelConnection.create({
-      data: { propertyId: property.id, channelId: channel.id, enabled: true, credentials: '' },
+      data: {
+        organizationId: organization.id,
+        propertyId: property.id,
+        channelId: channel.id,
+        enabled: true,
+        credentials: '',
+      },
     });
     await prisma.roomMapping.create({
       data: {
@@ -62,13 +97,12 @@ export async function makeWorld(opts: { capacity?: number; channels?: string[] }
     });
   }
 
-  return { property, room, connections };
+  return { organization, property, room, connections };
 }
 
 export async function cleanWorld() {
-  // FK cascades from Property handle most of it.
-  await prisma.conflictAlert.deleteMany({ where: { roomType: { property: { code: { startsWith: PREFIX } } } } });
-  await prisma.property.deleteMany({ where: { code: { startsWith: PREFIX } } });
+  // Cascades from Organization handle everything owned by test orgs.
+  await prisma.organization.deleteMany({ where: { slug: { startsWith: `${PREFIX}-org` } } });
   await prisma.syncJob.deleteMany({ where: { payload: { path: ['reason'], equals: 'test' } } });
 }
 

@@ -1,7 +1,8 @@
 import { Router } from 'express';
 import { prisma } from '../db';
-import { asyncHandler, badRequest } from '../lib/http';
+import { asyncHandler, badRequest, unauthorized } from '../lib/http';
 import { logger } from '../lib/logger';
+import { timingSafeEqual } from '../lib/crypto';
 import { resolveConnection } from '../connectors/registry';
 import { ingestBooking } from './ingest';
 
@@ -39,11 +40,22 @@ webhookRouter.post(
 
       const property = await prisma.property.findUnique({ where: { code: propertyCode } });
       if (!property) throw badRequest(`Unknown property code "${propertyCode}"`);
+      await prisma.webhookEvent.update({ where: { id: event.id }, data: { organizationId: property.organizationId } });
 
       const connection = await prisma.channelConnection.findUnique({
         where: { propertyId_channelId: { propertyId: property.id, channelId: channel.id } },
       });
       if (!connection) throw badRequest(`No connection for ${channelCode} on property ${propertyCode}`);
+
+      // This endpoint is unauthenticated by necessity (a real OTA has no session), and
+      // `propertyCode` is intentionally public (the booking microsite/SEO surface), so
+      // the secret is the only thing stopping anyone who finds a property code from
+      // injecting fake bookings. Fail closed if it's missing or wrong — never treat an
+      // unset stored secret as "no secret required".
+      const providedSecret = (req.query.secret as string) || (req.headers['x-webhook-secret'] as string) || '';
+      if (!connection.webhookSecret || !timingSafeEqual(providedSecret, connection.webhookSecret)) {
+        throw unauthorized('Missing or invalid webhook secret for this connection.');
+      }
 
       const { connector, ctx } = await resolveConnection(connection.id);
       const normalized = connector.parseWebhook

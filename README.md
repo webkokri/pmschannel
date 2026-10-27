@@ -1,10 +1,34 @@
 # Channel Manager
 
-A channel-manager automation platform for lodging operators in **Canada and the USA**.
-It ingests bookings from every connected OTA, prevents double-bookings, and pushes
-availability / rates / restrictions (ARI) back out to all the *other* channels so
-inventory never drifts. Ships with an admin panel (dashboard, channel configuration,
-ARI calendar, bookings, conflicts, sync logs) and a booking simulator.
+A **multi-tenant SaaS hospitality platform** for lodging operators in **Canada and the
+USA** — a channel manager at its core (ingests bookings from every connected OTA,
+prevents double-bookings, pushes availability/rates/restrictions back out to every other
+channel), plus the property-management, revenue-management, finance, staff and guest
+-facing modules a real operation needs around it. Hotel/property owners sign up, subscribe
+to a plan, and get their own isolated workspace. A platform **super admin** has full
+control over every tenant, every subscription plan, and the global OTA catalogue.
+
+## Modules
+
+| Area | What it does |
+|---|---|
+| **Channel manager** | OTA connections, ARI sync engine, conflict guard, booking simulator (see below) |
+| **PMS** (front desk) | `/pms` — arrivals/departures/in-house board, check-in/out, room-unit housekeeping status |
+| **RMS** (pricing) | `/rms` — rule-based auto-pricing (day-of-week, occupancy, lead-time, length-of-stay), nightly + on-demand, full change log |
+| **CRS** | The channel-sync core already centralizes reservations across properties; `/api/bookings/calendar` surfaces it as one cross-property view |
+| **Finance** | `/finance` — revenue by channel net of OTA commission, expense tracking, P&L |
+| **Packages** | `/packages` — guest-facing bundles (room + add-ons) at a special rate |
+| **Payments** | Guest charges/refunds against a booking via a pluggable gateway (Stripe by default) |
+| **Notifications** | Email (SMTP) + SMS (Twilio) on booking confirmation/cancellation/overbooking, editable templates, send log |
+| **Staff & roles** | `/staff` — profiles (title/department/phone) + a granular permission overlay on top of admin/manager/viewer |
+| **General settings** | `/settings` → General — org profile: logo, brand color, tax ID, locale, invoice footer |
+| **SEO / GEO / AEO** | `/seo` + a real public booking microsite at `/book/:code` — meta tags, `schema.org` LodgingBusiness/FAQPage structured data, sitemap |
+| **Reports** | `/reports` — occupancy, revenue, booking-source, CSV export |
+| **AI assistant** | Floating chat (Claude-backed) answering from a live data snapshot, plus AI pricing/occupancy suggestions on the RMS page |
+
+Payments, notifications and AI all follow the same pattern: real integration code that's a
+safe no-op ("not configured") until you add the relevant API key — see
+[Optional integrations](#optional-integrations).
 
 > **OTA connectors** – real OTA APIs need signed partner agreements and credentials.
 > This repo implements a **pluggable connector framework** with a fully working
@@ -61,6 +85,44 @@ ARI calendar, bookings, conflicts, sync logs) and a booking simulator.
 
 ---
 
+## Multi-tenant SaaS
+
+Every tenant-owned table carries an `organizationId`; the OTA catalogue and `Plan`
+catalogue are the only platform-global data. See [`shared/src/plan-catalog.ts`](shared/src/plan-catalog.ts)
+for the seeded default packages — property count is the primary axis:
+
+| | Starter | Growth | Enterprise |
+|---|---|---|---|
+| Properties | 1 | up to 3 | up to 25 |
+| Channel connections | 3 | 10 | unlimited |
+| Channel categories | direct + global | + North America | + GDS |
+| Team members | 2 | 5 | 20 |
+
+Limits are enforced server-side (`backend/src/lib/limits.ts`) at the moment an owner tries
+to add a property/channel/user past their plan — the API returns `402` with a clear
+"upgrade to X" message the frontend turns into an upgrade prompt (`components/ui.tsx`'s
+`LimitBanner`). A super admin can override any organization's plan or status by hand at
+any time from `/admin`, no payment required.
+
+**Self-serve signup** (`/signup` → `POST /api/auth/signup`) creates an `Organization` + a
+trial `Subscription` + the first admin `User` in one transaction, and auto-assigns a
+**dedicated support manager** from the platform staff pool (least-loaded first —
+`backend/src/lib/support.ts`), shown to the owner on their Billing page.
+
+**Billing** (`backend/src/modules/billing.ts`) works with or without Stripe: downgrades
+apply immediately; upgrades create a Stripe Checkout session when `STRIPE_SECRET_KEY` is
+set, and otherwise are recorded as a pending request the super admin/support manager
+actions manually (`backend/src/lib/stripe.ts` is a safe no-op until configured).
+
+**Super admin** (`/admin`, gated by `User.isSuperAdmin`, no `organizationId`) has full
+platform control: every organization (search, change plan/status, reassign support
+manager, impersonate for support), the plan catalogue, the global OTA catalogue,
+platform-wide settings and audit log, and the support-manager staff pool. Impersonation
+issues a short-lived (30 min) token scoped to that organization so support can see exactly
+what the owner sees.
+
+---
+
 ## Stack
 
 | Layer | Choice |
@@ -97,19 +159,26 @@ npm run dev
 
 Open **http://localhost:5173** and sign in:
 
-| Email | Password | Role |
+| Email | Password | Access |
 |---|---|---|
-| `admin@channelmanager.local` | `admin12345` | admin |
-| `manager@channelmanager.local` | `manager12345` | manager |
+| `superadmin@channelmanager.local` | `superadmin12345` | platform super admin → `/admin` |
+| `admin@channelmanager.local` | `admin12345` | "Demo Hotels" organization admin |
+| `manager@channelmanager.local` | `manager12345` | "Demo Hotels" organization manager |
+
+Or sign up a brand-new organization yourself at **/signup**.
 
 ### See it work
 
-1. **Simulator → Generate 20 bookings** across the connected mock channels. Watch
+1. **Sign up** a new organization on the Starter plan, then try adding a 2nd property —
+   blocked with an upgrade prompt (Starter allows 1). Add a 4th on Growth — same thing
+   (Growth allows 3). Log in as the super admin, find the org under **Organizations**, and
+   bump its plan — the limit lifts immediately.
+2. **Simulator → Generate 20 bookings** across the connected mock channels. Watch
    *Bookings* fill, *Calendar* availability drop, and *Sync Logs* show availability
    pushes fanning out to the other channels.
-2. **Simulator → Force an overbooking**. *Conflicts* gets a new `double_booking` /
+3. **Simulator → Force an overbooking**. *Conflicts* gets a new `double_booking` /
    `overbooking` alert and the offending reservation is `rejected` (auto-protect).
-3. **Simulator → Start autopilot** to have the worker's poll loop invent a steady
+4. **Simulator → Start autopilot** to have the worker's poll loop invent a steady
    stream of bookings; the dashboard updates live.
 
 ---
@@ -128,28 +197,44 @@ Open **http://localhost:5173** and sign in:
 
 ---
 
+## Optional integrations
+
+Every one of these ships as real, wired-up code that runs in a safe "not configured" mode
+(clear message, nothing crashes, nothing silently pretends to succeed) until you add the
+matching environment variable(s) to `.env`. Nothing else changes — same UI, same API.
+
+| Feature | Env vars | Provider assumed |
+|---|---|---|
+| Guest payments | `STRIPE_SECRET_KEY` | Stripe (PaymentIntents) — `backend/src/lib/payments/` |
+| Subscription billing | `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET` | Stripe Checkout — `backend/src/lib/stripe.ts` |
+| Email notifications | `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `SMTP_FROM` | Any SMTP provider (Postmark, SES, SendGrid SMTP, …) — `backend/src/lib/notify/email.ts` |
+| SMS notifications | `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_FROM_NUMBER` | Twilio — `backend/src/lib/notify/sms.ts` |
+| AI assistant + suggestions | `ANTHROPIC_API_KEY` | Claude API — `backend/src/lib/ai/claude.ts` |
+
+The AI assistant is answer-only over a data snapshot the backend assembles per request
+(recent bookings, occupancy, open conflicts) — it has no path to a mutating database call,
+by design; anything it suggests, staff action through the normal screens.
+
+---
+
 ## Deployment (cloud)
 
+**See [`DEPLOYMENT.md`](DEPLOYMENT.md)** for the full walkthrough — a `render.yaml`
+Blueprint provisions a managed Postgres + the web service (API, and it also serves the
+built admin panel — one deployable process) + a background worker in one pass on
+[Render](https://render.com), plus generic Docker/Node instructions for any other host.
+
 Prisma targets PostgreSQL, so production is the same schema with a different
-`DATABASE_URL`.
-
-```bash
-# point at your managed Postgres
-export DATABASE_URL="postgresql://user:pass@host:5432/channel_manager"
-npm ci
-npm run build
-npm run -w backend prisma:migrate      # migrate deploy
-npm run -w backend seed                 # first deploy only
-
-node backend/dist/index.js              # API   (PORT, defaults 4000)
-node backend/dist/worker/index.js       # worker (run as a separate process/service)
-# serve frontend/dist as static files behind the API or a CDN
-```
+`DATABASE_URL`. `npm run build` bundles the backend (shared code inlined, so
+`node backend/dist/index.js` / `.../worker/index.js` run standalone with no workspace
+symlinks needed) and builds the frontend to `frontend/dist`, which the API serves directly
+when `NODE_ENV=production`.
 
 A `docker-compose.yml` is included for running Postgres anywhere Docker is available.
 
 Set real secrets in production: `JWT_SECRET`, `CM_SECRET` (32+ chars, encrypts channel
-credentials at rest).
+credentials at rest, identical across the web and worker processes), and optionally
+`STRIPE_SECRET_KEY` / `STRIPE_WEBHOOK_SECRET` to turn on real billing.
 
 ---
 

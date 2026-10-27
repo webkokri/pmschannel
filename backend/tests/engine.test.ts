@@ -23,8 +23,8 @@ let world: Awaited<ReturnType<typeof makeWorld>>;
 
 beforeAll(async () => {
   await cleanWorld();
-  await updateSettings({ autoProtectOverbooking: true, detectRateMismatch: true });
   world = await makeWorld({ capacity: 2, channels: ['booking_com', 'airbnb'] });
+  await updateSettings(world.organization.id, { autoProtectOverbooking: true, detectRateMismatch: true });
 });
 
 afterAll(async () => {
