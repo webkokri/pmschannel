@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '@/api/client';
 import { useProperty } from '@/lib/property';
-import { EmptyState, ErrorNote, PageHeader, Spinner } from '@/components/ui';
+import { CopyButton, EmptyState, ErrorNote, PageHeader, Spinner } from '@/components/ui';
 
 interface Seo {
   metaTitle: string;
@@ -53,6 +53,7 @@ export function SeoPage() {
   if (error) return <ErrorNote error={error} />;
 
   const publicUrl = `${location.origin}/book/${selected?.code}`;
+  const embedCode = `<iframe src="${publicUrl}" width="100%" height="900" style="border:0" loading="lazy" title="Book ${selected?.name ?? ''}"></iframe>`;
 
   return (
     <div>
@@ -101,8 +102,8 @@ export function SeoPage() {
             Save
           </button>
           <p className="text-xs text-slate-400">
-            Public URL once published: <code>{publicUrl}</code>. Guests booking there flow through the same conflict-checked
-            pipeline as every other channel (as "Direct website booking engine") — connect and map that channel first.
+            Guests booking there flow through the same conflict-checked pipeline as every other channel (as "Direct
+            website booking engine") — connect and map that channel first.
           </p>
         </div>
 
@@ -136,6 +137,39 @@ export function SeoPage() {
               + Add FAQ
             </button>
           </div>
+        </div>
+      </div>
+
+      <div className="card mt-4 space-y-4 p-4">
+        <h3 className="text-sm font-semibold">Link & embed</h3>
+        {!form.published && (
+          <p className="text-xs text-amber-500">Publish this page above before sharing the link or embed — both 404 until then.</p>
+        )}
+        <div>
+          <label className="label">Direct link</label>
+          <div className="flex gap-2">
+            <input className="input flex-1" readOnly value={publicUrl} onFocus={(e) => e.target.select()} />
+            <CopyButton text={publicUrl} />
+          </div>
+          <p className="mt-1 text-xs text-slate-500">Share this anywhere — social bio, email signature, a QR code at the front desk.</p>
+        </div>
+        <div>
+          <label className="label">Embed on your own website</label>
+          <div className="flex items-start gap-2">
+            <textarea
+              className="input flex-1 font-mono text-xs"
+              rows={3}
+              readOnly
+              value={embedCode}
+              onFocus={(e) => e.target.select()}
+            />
+            <CopyButton text={embedCode} />
+          </div>
+          <p className="mt-1 text-xs text-slate-500">
+            Paste this snippet into your own site (Wix, Squarespace, WordPress — anywhere that accepts custom HTML). It
+            shows the same search-and-book page inline, including live availability and payment if you've configured a
+            checkout gateway in Settings → Payments.
+          </p>
         </div>
       </div>
     </div>

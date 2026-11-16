@@ -7,6 +7,7 @@ import { prisma } from '../db';
 import { env } from '../env';
 import { asyncHandler, badRequest, forbidden, parse, unauthorized } from '../lib/http';
 import { assignSupportManager } from '../lib/support';
+import { getPlatformSetting } from '../lib/platform-settings';
 
 export interface AuthUser {
   id: string;
@@ -158,6 +159,13 @@ function slugify(name: string): string {
 authRouter.post(
   '/signup',
   asyncHandler(async (req, res) => {
+    // Checked server-side regardless of whether the frontend hid the signup link —
+    // a disabled toggle must actually block account creation, not just the UI path to it.
+    const signupEnabled = await getPlatformSetting<boolean>('signupEnabled');
+    if (signupEnabled === false) {
+      throw forbidden('New signups are currently closed. Contact us if you were invited to join.');
+    }
+
     const body = parse(signupInput, req.body);
 
     const existing = await prisma.user.findUnique({ where: { email: body.email.toLowerCase() } });

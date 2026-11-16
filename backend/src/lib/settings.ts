@@ -1,4 +1,7 @@
+import type { Prisma as PrismaNS } from '@prisma/client';
 import { prisma } from '../db';
+
+type Tx = PrismaNS.TransactionClient | typeof prisma;
 
 /** Per-organization engine settings. Stored one row per (organizationId, key) in `Setting`. */
 export interface AppSettings {
@@ -26,8 +29,15 @@ export const DEFAULT_SETTINGS: AppSettings = {
   stopSellOnZero: true,
 };
 
-export async function getSettings(organizationId: string): Promise<AppSettings> {
-  const rows = await prisma.setting.findMany({ where: { organizationId } });
+/**
+ * `client` lets a caller already inside a `prisma.$transaction(...)` (e.g. the conflict
+ * engine) reuse that transaction's own connection instead of pulling a second one from the
+ * pool — doing otherwise is a real deadlock/exhaustion risk: several concurrent
+ * transactions can each hold a connection while queued on an advisory lock, leaving none
+ * spare for a nested query made through the plain (non-transactional) client.
+ */
+export async function getSettings(organizationId: string, client: Tx = prisma): Promise<AppSettings> {
+  const rows = await client.setting.findMany({ where: { organizationId } });
   const map = Object.fromEntries(rows.map((r) => [r.key, r.value]));
   return { ...DEFAULT_SETTINGS, ...(map as Partial<AppSettings>) };
 }

@@ -309,7 +309,7 @@ function PaymentsTab() {
   return (
     <div className="grid gap-4 lg:grid-cols-2">
       <div className="card p-4">
-        <h3 className="mb-2 text-sm font-semibold">Guest payment gateway</h3>
+        <h3 className="mb-2 text-sm font-semibold">Staff-initiated card charges</h3>
         <p className="text-sm">
           Provider: <b className="capitalize">{data?.gateway.name}</b> —{' '}
           {data?.gateway.configured ? (
@@ -322,7 +322,8 @@ function PaymentsTab() {
           <p className="mt-1 text-xs text-slate-500">Your negotiated commission rate: {(data.commissionRateBps / 100).toFixed(2)}%</p>
         )}
         <p className="mt-2 text-xs text-slate-400">
-          Once configured, charge and refund guests directly from a booking's detail view in Bookings.
+          Always Stripe — charge and refund a guest directly from a booking's detail view in Bookings. The direct-booking
+          checkout gateway below (Stripe or Moneris) is separate and only applies to your public booking page.
         </p>
       </div>
 
@@ -343,6 +344,122 @@ function PaymentsTab() {
           {status === 'not_started' ? 'Connect with Stripe' : 'Manage / continue onboarding'}
         </button>
         {onboard.data && !onboard.data.ok && <p className="mt-2 text-xs text-amber-500">{onboard.data.message}</p>}
+      </div>
+
+      <DirectBookingGatewayCard />
+    </div>
+  );
+}
+
+interface MonerisStatus {
+  configured: boolean;
+  storeId?: string;
+  checkoutId?: string;
+  environment?: string;
+}
+
+function DirectBookingGatewayCard() {
+  const qc = useQueryClient();
+  const { data, isLoading } = useQuery({
+    queryKey: ['gateway-config'],
+    queryFn: () => api<{ gateway: 'stripe' | 'moneris'; stripeConfigured: boolean; moneris: MonerisStatus }>('/payments/gateway-config'),
+  });
+  const [gateway, setGateway] = useState<'stripe' | 'moneris'>('stripe');
+  const [moneris, setMoneris] = useState({ storeId: '', apiToken: '', checkoutId: '', environment: 'qa' as 'qa' | 'live' });
+  const [saved, setSaved] = useState(false);
+
+  useEffect(() => {
+    if (data) {
+      setGateway(data.gateway);
+      setMoneris((m) => ({ ...m, storeId: data.moneris.storeId ?? '', checkoutId: data.moneris.checkoutId ?? '', environment: (data.moneris.environment as 'qa' | 'live') ?? 'qa' }));
+    }
+  }, [data]);
+
+  const save = useMutation({
+    mutationFn: (json: Record<string, unknown>) => api('/payments/gateway-config', { method: 'PATCH', json }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['gateway-config'] });
+      setSaved(true);
+      setTimeout(() => setSaved(false), 3000);
+    },
+  });
+
+  if (isLoading || !data) return <div className="card p-4 lg:col-span-2"><Spinner /></div>;
+
+  return (
+    <div className="card p-4 lg:col-span-2">
+      <h3 className="mb-2 text-sm font-semibold">Direct booking checkout (public booking page)</h3>
+      <p className="mb-3 text-xs text-slate-500">
+        Which gateway guests pay through when they book directly on your public page or embed. Stripe uses your Connect
+        payout above; Moneris pays out to your own Moneris-linked account directly — we still record our commission for
+        reporting, but don't collect it automatically for Moneris.
+      </p>
+      <div className="flex gap-2">
+        {(['stripe', 'moneris'] as const).map((g) => (
+          <button
+            key={g}
+            className={g === gateway ? 'btn-primary !py-1.5 capitalize' : 'btn-ghost !py-1.5 capitalize'}
+            onClick={() => setGateway(g)}
+          >
+            {g}
+          </button>
+        ))}
+      </div>
+
+      {gateway === 'stripe' && (
+        <p className="mt-3 text-xs text-slate-500">
+          {data.stripeConfigured ? (
+            <span className="text-emerald-600 dark:text-emerald-400">Stripe is configured on this server.</span>
+          ) : (
+            <span className="text-amber-500">Stripe is not configured on this server yet (no STRIPE_SECRET_KEY).</span>
+          )}
+        </p>
+      )}
+
+      {gateway === 'moneris' && (
+        <div className="mt-3 grid gap-3 sm:grid-cols-2">
+          <div>
+            <label className="label">Store ID</label>
+            <input className="input" value={moneris.storeId} onChange={(e) => setMoneris({ ...moneris, storeId: e.target.value })} />
+          </div>
+          <div>
+            <label className="label">API token</label>
+            <input
+              className="input"
+              type="password"
+              placeholder={data.moneris.configured ? 'saved — leave blank to keep' : 'not set'}
+              value={moneris.apiToken}
+              onChange={(e) => setMoneris({ ...moneris, apiToken: e.target.value })}
+            />
+          </div>
+          <div>
+            <label className="label">Checkout ID</label>
+            <input className="input" value={moneris.checkoutId} onChange={(e) => setMoneris({ ...moneris, checkoutId: e.target.value })} />
+          </div>
+          <div>
+            <label className="label">Environment</label>
+            <select className="input" value={moneris.environment} onChange={(e) => setMoneris({ ...moneris, environment: e.target.value as 'qa' | 'live' })}>
+              <option value="qa">Test (qa)</option>
+              <option value="live">Live</option>
+            </select>
+          </div>
+        </div>
+      )}
+
+      <div className="mt-3 flex items-center gap-3">
+        <button
+          className="btn-primary"
+          disabled={save.isPending}
+          onClick={() =>
+            save.mutate({
+              gateway,
+              ...(gateway === 'moneris' ? { moneris: { ...moneris, apiToken: moneris.apiToken || undefined } } : {}),
+            })
+          }
+        >
+          Save
+        </button>
+        {saved && <span className="text-xs text-emerald-600 dark:text-emerald-400">Saved</span>}
       </div>
     </div>
   );

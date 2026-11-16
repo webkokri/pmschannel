@@ -2,7 +2,7 @@ import { nightsBetween, type NormalizedBooking } from '@cm/shared';
 import { prisma } from '../db';
 import { logger } from '../lib/logger';
 import { notify } from '../lib/notify/send';
-import { evaluateBooking } from './conflict';
+import { evaluateBooking, type PendingNotification } from './conflict';
 import { enqueueAvailabilityFanout, recomputeAvailability } from './ari';
 
 const log = logger('engine:ingest');
@@ -82,9 +82,12 @@ export async function ingestBooking(
     status: b.status,
     guestName: b.guestName,
     guestEmail: b.guestEmail ?? null,
+    guestPhone: b.guestPhone ?? '',
     checkIn: new Date(b.checkIn + 'T00:00:00Z'),
     checkOut: new Date(b.checkOut + 'T00:00:00Z'),
     unitsBooked: b.units,
+    adults: b.adults ?? 1,
+    children: b.children ?? 0,
     currency: b.currency,
     amount: b.amount,
     unmapped,
@@ -138,6 +141,7 @@ export async function ingestBooking(
   let overbooking = false;
   let rejected = false;
   let conflictIds: string[] = [];
+  let pendingNotifications: PendingNotification[] = [];
 
   /**
    * Everything that reads or depends on "how many units are already committed for
@@ -150,48 +154,63 @@ export async function ingestBooking(
    * affected room type to avoid deadlocking against another concurrent ingest that
    * touches the same two rooms in the opposite order.
    */
-  await prisma.$transaction(async (tx) => {
-    const roomTypeIdsToLock = [...new Set([roomTypeId, existing?.roomTypeId ?? null].filter(Boolean))].sort() as string[];
-    for (const rtId of roomTypeIdsToLock) {
-      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${rtId}))`;
-    }
+  await prisma.$transaction(
+    async (tx) => {
+      const roomTypeIdsToLock = [...new Set([roomTypeId, existing?.roomTypeId ?? null].filter(Boolean))].sort() as string[];
+      for (const rtId of roomTypeIdsToLock) {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${rtId}))`;
+      }
 
-    if (existing) {
-      action = 'updated';
-      await tx.booking.update({ where: { id: existing.id }, data });
-      await tx.bookingNight.deleteMany({ where: { bookingId: existing.id } });
-      await tx.bookingNight.createMany({
-        data: nights.map((d) => ({ bookingId: existing.id, date: new Date(d + 'T00:00:00Z'), units: b.units })),
-      });
-      bookingId = existing.id;
-    } else {
-      const created = await tx.booking.create({
-        data: {
-          ...data,
-          nights: {
-            create: nights.map((d) => ({ date: new Date(d + 'T00:00:00Z'), units: b.units })),
+      if (existing) {
+        action = 'updated';
+        await tx.booking.update({ where: { id: existing.id }, data });
+        await tx.bookingNight.deleteMany({ where: { bookingId: existing.id } });
+        await tx.bookingNight.createMany({
+          data: nights.map((d) => ({ bookingId: existing.id, date: new Date(d + 'T00:00:00Z'), units: b.units })),
+        });
+        bookingId = existing.id;
+      } else {
+        const created = await tx.booking.create({
+          data: {
+            ...data,
+            nights: {
+              create: nights.map((d) => ({ date: new Date(d + 'T00:00:00Z'), units: b.units })),
+            },
           },
-        },
-      });
-      bookingId = created.id;
-    }
+        });
+        bookingId = created.id;
+      }
 
-    // Conflict evaluation (may flip status → rejected) — sees every other booking
-    // already committed for this room, including ones from a different channel.
-    if (!unmapped && (b.status === 'confirmed' || b.status === 'modified')) {
-      const fresh = await tx.booking.findUniqueOrThrow({ where: { id: bookingId } });
-      const evalResult = await evaluateBooking(fresh, tx);
-      overbooking = evalResult.overbooking;
-      rejected = evalResult.rejected;
-      conflictIds = evalResult.alertIds;
-    }
+      // Conflict evaluation (may flip status → rejected) — sees every other booking
+      // already committed for this room, including ones from a different channel.
+      if (!unmapped && (b.status === 'confirmed' || b.status === 'modified')) {
+        const fresh = await tx.booking.findUniqueOrThrow({ where: { id: bookingId } });
+        const evalResult = await evaluateBooking(fresh, tx);
+        overbooking = evalResult.overbooking;
+        rejected = evalResult.rejected;
+        conflictIds = evalResult.alertIds;
+        pendingNotifications = evalResult.pendingNotifications;
+      }
 
-    // Recompute availability while still holding the lock, so the number every
-    // channel gets pushed next always reflects this booking (accepted or rejected).
-    for (const [rt, dateSet] of affectedRooms) {
-      await recomputeAvailability(rt, [...dateSet].sort(), tx);
-    }
-  });
+      // Recompute availability while still holding the lock, so the number every
+      // channel gets pushed next always reflects this booking (accepted or rejected).
+      for (const [rt, dateSet] of affectedRooms) {
+        await recomputeAvailability(rt, [...dateSet].sort(), tx);
+      }
+    },
+    // Several concurrent bookings can queue up waiting on the same room's advisory
+    // lock (e.g. a last-room rush) — Prisma's 5s default transaction timeout is easy
+    // to blow through purely on lock-wait time, which would wrongly surface as a
+    // request failure rather than the booking just taking its turn. 20s comfortably
+    // covers realistic contention for a single room without masking a truly stuck query.
+    { timeout: 20_000, maxWait: 10_000 },
+  );
+
+  // Overbooking/double-booking staff alerts — sent now that the transaction (and the
+  // advisory lock it held) has released, not from inside it.
+  for (const n of pendingNotifications) {
+    await notify(property.organizationId, n.template, { email: n.email, vars: n.vars });
+  }
 
   // Fan out to the other channels — outside the transaction; this only enqueues
   // SyncJob rows (the worker does the actual push) so it doesn't need the lock.

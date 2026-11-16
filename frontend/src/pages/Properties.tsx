@@ -1,8 +1,9 @@
 import { useState } from 'react';
+import { Link } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '@/api/client';
 import { useProperty } from '@/lib/property';
-import { Drawer, ErrorNote, LimitBanner, PageHeader, Spinner, Table } from '@/components/ui';
+import { CopyButton, Drawer, ErrorNote, LimitBanner, PageHeader, Spinner, Table } from '@/components/ui';
 import { money } from '@/lib/format';
 
 interface RatePlan {
@@ -35,6 +36,7 @@ interface PropFull {
       ratePlans: RatePlan[];
       _count: { bookings: number };
     }[];
+    seo: { published: boolean } | null;
   };
 }
 
@@ -118,6 +120,40 @@ export function PropertiesPage() {
               <Info label="Country" value={data.property.country} />
               <Info label="Currency" value={data.property.currency} />
             </div>
+          </div>
+
+          <div className="card mb-4 p-4 text-sm">
+            <div className="mb-1 flex items-center justify-between">
+              <p className="font-medium">Public booking page</p>
+              <span
+                className={`badge ${
+                  data.property.seo?.published
+                    ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300'
+                    : 'bg-slate-200 text-slate-600 dark:bg-slate-700 dark:text-slate-300'
+                }`}
+              >
+                {data.property.seo?.published ? 'live — no login needed' : 'not published'}
+              </span>
+            </div>
+            {data.property.seo?.published ? (
+              <div className="flex items-center gap-2">
+                <input className="input flex-1" readOnly value={`${location.origin}/book/${data.property.code}`} onFocus={(e) => e.target.select()} />
+                <CopyButton text={`${location.origin}/book/${data.property.code}`} />
+                <a className="btn-ghost !py-1.5" href={`/book/${data.property.code}`} target="_blank" rel="noreferrer">
+                  Open ↗
+                </a>
+              </div>
+            ) : (
+              <p className="text-amber-500">This property's booking page isn't published yet — publish it from SEO below.</p>
+            )}
+            <p className="mt-2 text-xs text-slate-400">
+              Anyone with this link can search dates and book — it never requires staff login. Full SEO content, FAQs, and
+              the embed code for your own website are in the{' '}
+              <Link to="/seo" className="underline">
+                SEO / GEO / AEO
+              </Link>{' '}
+              page.
+            </p>
           </div>
 
           <div className="mb-2 flex items-center justify-between">

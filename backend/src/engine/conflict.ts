@@ -3,16 +3,27 @@ import type { Prisma as PrismaNS } from '@prisma/client';
 import { prisma } from '../db';
 import { logger } from '../lib/logger';
 import { getSettings } from '../lib/settings';
-import { notify } from '../lib/notify/send';
+import type { NotifyEventKey } from '../lib/notify/send';
 
 const log = logger('engine:conflict');
 
 type Tx = PrismaNS.TransactionClient | typeof prisma;
 
+export interface PendingNotification {
+  template: NotifyEventKey;
+  email: string;
+  vars: Record<string, string>;
+}
+
 export interface ConflictResult {
   overbooking: boolean;
   rejected: boolean;
   alertIds: string[];
+  /** Collected instead of sent here — `evaluateBooking` normally runs inside a
+   *  `prisma.$transaction(...)`, and sending mail/SMS is slow I/O with its own DB writes
+   *  that has no business extending a transaction's (or an advisory lock's) hold time. The
+   *  caller sends these once the transaction has committed. */
+  pendingNotifications: PendingNotification[];
 }
 
 interface BookingLike {
@@ -33,8 +44,8 @@ interface BookingLike {
  *  - rate_mismatch                 → low alert; booking left as-is
  */
 export async function evaluateBooking(booking: BookingLike, client: Tx = prisma): Promise<ConflictResult> {
-  const settings = await getSettings(booking.organizationId);
-  const result: ConflictResult = { overbooking: false, rejected: false, alertIds: [] };
+  const settings = await getSettings(booking.organizationId, client);
+  const result: ConflictResult = { overbooking: false, rejected: false, alertIds: [], pendingNotifications: [] };
   if (!booking.roomTypeId) return result;
 
   const room = await client.roomType.findUnique({ where: { id: booking.roomTypeId } });
@@ -119,11 +130,13 @@ export async function evaluateBooking(booking: BookingLike, client: Tx = prisma)
       `${type} on room ${room.id} — booking ${booking.id} ${result.rejected ? 'REJECTED' : 'flagged'}`,
     );
 
-    // Best-effort staff alert — never blocks the ingest.
+    // Best-effort staff alert — queued for the caller to send once the transaction
+    // this runs inside has committed (see `PendingNotification` above).
     const org = await client.organization.findUnique({ where: { id: booking.organizationId }, select: { contactEmail: true } });
     if (org?.contactEmail) {
       const details = alert.details as { message: string };
-      await notify(booking.organizationId, 'overbooking_alert', {
+      result.pendingNotifications.push({
+        template: 'overbooking_alert',
         email: org.contactEmail,
         vars: { propertyName: room.name, message: details.message },
       });

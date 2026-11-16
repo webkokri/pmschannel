@@ -1,11 +1,18 @@
 import { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
+import { useQuery } from '@tanstack/react-query';
+import { api } from '@/api/client';
 import { Wordmark } from '@/assets/logo';
 import { useAuth } from '@/lib/auth';
 
 export function LoginPage() {
   const { login } = useAuth();
   const nav = useNavigate();
+  const { data: plansData } = useQuery({
+    queryKey: ['public-plans'],
+    queryFn: () => api<{ signupEnabled: boolean }>('/plans'),
+  });
+  const signupEnabled = plansData?.signupEnabled !== false;
   const [email, setEmail] = useState('admin@channelmanager.local');
   const [password, setPassword] = useState('admin12345');
   const [error, setError] = useState<string | null>(null);
@@ -54,12 +61,14 @@ export function LoginPage() {
         <p className="mt-5 text-center text-xs text-slate-400">
           Seeded demo: admin@channelmanager.local / admin12345
         </p>
-        <p className="mt-2 text-center text-sm">
-          New hotel or property?{' '}
-          <Link to="/signup" className="font-medium text-brand-500 underline">
-            Start your free trial
-          </Link>
-        </p>
+        {signupEnabled && (
+          <p className="mt-2 text-center text-sm">
+            New hotel or property?{' '}
+            <Link to="/signup" className="font-medium text-brand-500 underline">
+              Start your free trial
+            </Link>
+          </p>
+        )}
       </div>
     </div>
   );

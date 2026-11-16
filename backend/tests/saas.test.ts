@@ -116,6 +116,27 @@ describe('plan limits — property count', () => {
   });
 });
 
+describe('public booking page — no login required', () => {
+  it('a newly created property is published and bookable with zero manual setup', async () => {
+    const { token } = await signupAndLogin(`${PREFIX} Instant Publish`, 'starter');
+    const code = `${PREFIX}-IP1`;
+    const created = await createProperty(token, code);
+    expect(created.status).toBe(201);
+
+    // No authorization header at all — this is exactly what a guest's browser sends.
+    const publicPage = await request(app).get(`/api/public/properties/${code}`);
+    expect(publicPage.status).toBe(200);
+    expect(publicPage.body.property.code).toBe(code);
+  });
+
+  it('an unauthenticated request never gets redirected to a login response', async () => {
+    const res = await request(app).get('/api/public/properties/does-not-exist');
+    // 404 ("property not found" or "not published"), never 401 — a guest with no
+    // token at all must never be treated as a failed/expired login.
+    expect(res.status).toBe(404);
+  });
+});
+
 describe('tenant isolation', () => {
   it('org A cannot read or modify org B\'s property by id', async () => {
     const a = await signupAndLogin(`${PREFIX} Org A`, 'growth');

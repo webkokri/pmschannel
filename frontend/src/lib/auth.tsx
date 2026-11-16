@@ -1,5 +1,6 @@
 import { createContext, useContext, useEffect, useState, type ReactNode } from 'react';
 import { api, setToken } from '@/api/client';
+import { isPublicRoute } from '@/lib/publicRoutes';
 
 export interface User {
   id: string;
@@ -26,6 +27,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
+    // Public pages (the booking microsite) must work with zero session — skip the
+    // check entirely rather than let a guaranteed-401 `/auth/me` call (no visitor there
+    // has a token) feed the global 401 handler and bounce them to /login.
+    if (isPublicRoute(location.pathname)) {
+      setLoading(false);
+      return;
+    }
     api<{ user: User }>('/auth/me')
       .then((r) => setUser(r.user))
       .catch(() => setUser(null))

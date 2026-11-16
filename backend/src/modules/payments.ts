@@ -4,11 +4,68 @@ import { prisma } from '../db';
 import { asyncHandler, badRequest, parse } from '../lib/http';
 import { requireOrg, assertOwned } from '../lib/tenant';
 import { requireRole } from '../auth';
-import { getPaymentGateway } from '../lib/payments';
+import { getGatewayForPayment, getPaymentGateway } from '../lib/payments';
+import { stripeConfigured } from '../lib/stripe';
 import { computeCommission } from '../lib/commission';
+import { getOrgSetting, setOrgSetting } from '../lib/settings';
+import { decryptJson, encryptJson, redactCredentials } from '../lib/crypto';
+import type { MonerisCredentials } from '../lib/payments/moneris-gateway';
 
 export const paymentsRouter = Router();
 paymentsRouter.use(requireOrg);
+
+/** Which gateway this org's *public, guest-facing* direct booking checkout uses. */
+paymentsRouter.get(
+  '/gateway-config',
+  asyncHandler(async (req, res) => {
+    const organizationId = req.user!.organizationId!;
+    const gateway = (await getOrgSetting<string>(organizationId, 'payments:gateway')) ?? 'stripe';
+    const encrypted = await getOrgSetting<string>(organizationId, 'payments:moneris');
+    const moneris = encrypted ? decryptJson<MonerisCredentials>(encrypted) : null;
+    res.json({
+      gateway,
+      stripeConfigured,
+      moneris: moneris
+        ? { ...redactCredentials(moneris as unknown as Record<string, unknown>), configured: true }
+        : { configured: false },
+    });
+  }),
+);
+
+const gatewayConfigInput = z.object({
+  gateway: z.enum(['stripe', 'moneris']),
+  moneris: z
+    .object({
+      storeId: z.string().optional(),
+      apiToken: z.string().optional(),
+      checkoutId: z.string().optional(),
+      environment: z.enum(['qa', 'live']).optional(),
+    })
+    .optional(),
+});
+
+paymentsRouter.patch(
+  '/gateway-config',
+  requireRole('admin'),
+  asyncHandler(async (req, res) => {
+    const organizationId = req.user!.organizationId!;
+    const body = parse(gatewayConfigInput, req.body);
+    await setOrgSetting(organizationId, 'payments:gateway', body.gateway);
+
+    if (body.moneris) {
+      const existingEncrypted = await getOrgSetting<string>(organizationId, 'payments:moneris');
+      const existing = existingEncrypted ? decryptJson<MonerisCredentials>(existingEncrypted) : null;
+      const merged: MonerisCredentials = {
+        storeId: body.moneris.storeId ?? existing?.storeId ?? '',
+        apiToken: body.moneris.apiToken ?? existing?.apiToken ?? '',
+        checkoutId: body.moneris.checkoutId ?? existing?.checkoutId ?? '',
+        environment: body.moneris.environment ?? existing?.environment ?? 'qa',
+      };
+      await setOrgSetting(organizationId, 'payments:moneris', encryptJson(merged));
+    }
+    res.json({ ok: true });
+  }),
+);
 
 paymentsRouter.get(
   '/',
@@ -148,7 +205,7 @@ paymentsRouter.post(
     if (body.amountCents > remaining) throw badRequest(`Cannot refund more than the remaining ${remaining} cents`);
 
     if (payment.method === 'card' && payment.gatewayRef) {
-      const gateway = getPaymentGateway();
+      const gateway = await getGatewayForPayment(organizationId, payment.gateway);
       const result = await gateway.refund({ gatewayRef: payment.gatewayRef, amountCents: body.amountCents });
       if (!result.ok) throw badRequest(result.message);
     }

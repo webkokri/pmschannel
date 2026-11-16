@@ -131,6 +131,8 @@ describe('public microsite', () => {
       checkOut: isoDate(22),
       guestName: 'Public Guest',
       guestEmail: 'pub@example.com',
+      guestPhone: '+15551234567',
+      adults: 2,
     });
     expect(res.status).toBe(201);
 
@@ -140,11 +142,28 @@ describe('public microsite', () => {
     // never decrements availability and OTAs never learn the room is taken.
     expect(booking?.roomTypeId).toBe(world.room.id);
     expect(booking?.unmapped).toBe(false);
+    expect(booking?.guestPhone).toBe('+15551234567');
+    expect(booking?.adults).toBe(2);
 
     const day = await prisma.calendarDay.findFirst({
       where: { roomTypeId: world.room.id, date: new Date(isoDate(20) + 'T00:00:00Z') },
     });
     expect(day?.availableUnits).toBe(1); // capacity 2 − 1 booked via the portal
+  });
+
+  it('rejects a party larger than the room (and every requested room) sleeps', async () => {
+    const res = await request(app).post(`/api/public/bookings/${world.property.code}`).send({
+      roomTypeId: world.room.id,
+      checkIn: isoDate(40),
+      checkOut: isoDate(42),
+      guestName: 'Too Many',
+      guestEmail: 'toomany@example.com',
+      guestPhone: '+15551234567',
+      adults: 3, // room sleeps 2, only 1 room requested
+    });
+    expect(res.status).toBe(400);
+    const booking = await prisma.booking.findFirst({ where: { guestEmail: 'toomany@example.com' } });
+    expect(booking).toBeNull();
   });
 
   it('a direct-portal booking is visible to the conflict engine against OTA bookings for the same room', async () => {

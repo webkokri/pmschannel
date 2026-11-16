@@ -1,3 +1,5 @@
+import { isPublicRoute } from '@/lib/publicRoutes';
+
 const TOKEN_KEY = 'cm.token';
 
 export function getToken(): string | null {
@@ -44,7 +46,12 @@ export async function api<T = unknown>(
 
   if (res.status === 401) {
     setToken(null);
-    if (!location.pathname.startsWith('/login')) location.assign('/login');
+    // A public page (the booking microsite) never has a session to lose — a 401 there
+    // (e.g. some unrelated authenticated call misfiring) must not bounce a guest to
+    // /login; that page has nothing to do with staff login at all.
+    if (!location.pathname.startsWith('/login') && !isPublicRoute(location.pathname)) {
+      location.assign('/login');
+    }
     throw new ApiError(401, 'Session expired', null);
   }
 

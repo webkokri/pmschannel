@@ -14,7 +14,7 @@
  */
 import { stripeConfigured, getStripeClient } from '../stripe';
 import { logger } from '../logger';
-import type { ChargeOptions, GatewayChargeResult, GatewayRefundResult, PaymentGateway } from './types';
+import type { ChargeOptions, GatewayChargeResult, GatewayRefundResult, GuestCheckoutOptions, GuestCheckoutResult, PaymentGateway } from './types';
 
 const log = logger('payments:stripe');
 
@@ -60,6 +60,38 @@ export const stripeGateway: PaymentGateway = {
       const message = err instanceof Error ? err.message : String(err);
       log.error('charge failed', err);
       return { ok: false, gatewayRef: '', splitAtGateway: false, message };
+    }
+  },
+
+  async createGuestCheckout(opts: GuestCheckoutOptions): Promise<GuestCheckoutResult> {
+    const stripe = await getStripeClient();
+    if (!stripe) return { ok: false, message: 'Payments are not configured on this server yet (no STRIPE_SECRET_KEY).' };
+    try {
+      const session = await stripe.checkout.sessions.create({
+        mode: 'payment',
+        line_items: [
+          {
+            price_data: {
+              currency: opts.currency.toLowerCase(),
+              unit_amount: opts.amountCents,
+              product_data: { name: opts.description },
+            },
+            quantity: 1,
+          },
+        ],
+        payment_intent_data: opts.destinationAccountId
+          ? { application_fee_amount: opts.applicationFeeCents, transfer_data: { destination: opts.destinationAccountId } }
+          : undefined,
+        success_url: opts.successUrl,
+        cancel_url: opts.cancelUrl,
+        metadata: { type: 'direct_booking', checkoutRef: opts.checkoutRef },
+      });
+      if (!session.url) return { ok: false, message: 'Stripe did not return a checkout URL.' };
+      return { ok: true, mode: 'redirect', url: session.url, message: 'Checkout session created' };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      log.error('createGuestCheckout failed', err);
+      return { ok: false, message };
     }
   },
 

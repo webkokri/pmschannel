@@ -46,6 +46,7 @@ propertiesRouter.get(
           include: { ratePlans: true, _count: { select: { bookings: true } } },
         },
         channelConnections: { include: { channel: true } },
+        seo: true,
       },
     });
     if (!property || property.organizationId !== req.user!.organizationId) throw notFound('Property not found');
@@ -61,6 +62,12 @@ propertiesRouter.post(
     const body = parse(propertyInput, req.body);
     await assertWithinLimit(organizationId, 'properties');
     const property = await prisma.property.create({ data: { ...body, organizationId } });
+    // Every property gets a working, published booking page from the moment it's
+    // created — no separate "publish" step to remember. Settings → SEO still lets staff
+    // customize or unpublish it; this is just the default, not the only way to get there.
+    await prisma.propertySeo.create({
+      data: { propertyId: property.id, metaTitle: property.name, published: true },
+    });
     res.status(201).json({ property });
   }),
 );

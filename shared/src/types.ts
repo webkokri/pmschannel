@@ -53,9 +53,13 @@ export interface NormalizedBooking {
   externalRatePlanId?: string | null;
   guestName: string;
   guestEmail?: string | null;
+  guestPhone?: string | null;
   checkIn: IsoDate;
   checkOut: IsoDate;
   units: number;
+  /** Party size — most OTAs don't report this; defaults applied in `ingestBooking`. */
+  adults?: number;
+  children?: number;
   currency: string;
   amount: number;
   /** Untouched original payload, stored for audit / debugging. */

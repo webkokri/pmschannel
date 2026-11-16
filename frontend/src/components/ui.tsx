@@ -1,7 +1,27 @@
-import type { ReactNode } from 'react';
+import { useState, type ReactNode } from 'react';
 import { Link } from 'react-router-dom';
 import { statusBadge } from '@/lib/format';
 import { ApiError } from '@/api/client';
+
+export function CopyButton({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <button
+      className="btn-ghost !py-1 !text-xs"
+      onClick={async () => {
+        try {
+          await navigator.clipboard.writeText(text);
+          setCopied(true);
+          setTimeout(() => setCopied(false), 2000);
+        } catch {
+          /* clipboard unavailable — the text is still visible to select manually */
+        }
+      }}
+    >
+      {copied ? 'Copied!' : 'Copy'}
+    </button>
+  );
+}
 
 export function PageHeader({
   title,

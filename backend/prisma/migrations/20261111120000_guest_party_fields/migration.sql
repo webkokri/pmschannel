@@ -1,0 +1,10 @@
+-- AlterTable
+ALTER TABLE "Booking" ADD COLUMN     "adults" INTEGER NOT NULL DEFAULT 1,
+ADD COLUMN     "children" INTEGER NOT NULL DEFAULT 0,
+ADD COLUMN     "guestPhone" TEXT NOT NULL DEFAULT '';
+
+-- AlterTable
+ALTER TABLE "PendingDirectBooking" ADD COLUMN     "adults" INTEGER NOT NULL DEFAULT 1,
+ADD COLUMN     "children" INTEGER NOT NULL DEFAULT 0,
+ADD COLUMN     "guestPhone" TEXT NOT NULL DEFAULT '';
+

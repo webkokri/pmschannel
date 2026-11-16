@@ -470,9 +470,15 @@ model Booking {
   status         BookingStatus @default(confirmed)
   guestName      String
   guestEmail     String?
+  guestPhone     String        @default("")
   checkIn        DateTime      @db.Date
   checkOut       DateTime      @db.Date
   unitsBooked    Int           @default(1)
+  /// Party size — not reported by every OTA, so these default to a reasonable single
+  /// occupant rather than being left unknown; the direct-booking search form always
+  /// collects them.
+  adults         Int           @default(1)
+  children       Int           @default(0)
   currency       String        @default("USD")
   amount         Decimal       @default(0) @db.Decimal(10, 2)
 
@@ -712,6 +718,10 @@ model Payment {
   currency       String        @default("USD")
   status         PaymentStatus @default(pending)
   method         String        @default("card") // card | cash | bank_transfer | other
+  /// Which guest-payment gateway processed this (if method is "card") — "stripe" or
+  /// "moneris". Refunds must route back through the same one, since each merchant's
+  /// Moneris credentials are org-specific while Stripe is the platform's single account.
+  gateway        String        @default("stripe")
   gatewayRef     String        @default("")
   refundedCents  Int           @default(0)
   capturedAt     DateTime?
@@ -734,6 +744,37 @@ model Payment {
 
   @@index([organizationId])
   @@index([bookingId])
+}
+
+/// A direct-booking request that's paying before it becomes a real `Booking` — created
+/// when a guest starts checkout on the public booking page, resolved into an actual
+/// booking (via the normal `ingestBooking` pipeline, conflict-checked like any channel)
+/// only once the gateway confirms payment. Nothing is held/reserved while this is
+/// "pending", so an abandoned checkout never ties up inventory; if the room sells out to
+/// someone else between checkout start and payment confirmation, the guest's payment is
+/// refunded automatically and this row is marked "rejected".
+model PendingDirectBooking {
+  id             String   @id @default(cuid())
+  organizationId String
+  propertyId     String
+  roomTypeId     String
+  checkIn        DateTime
+  checkOut       DateTime
+  units          Int      @default(1)
+  guestName      String
+  guestEmail     String
+  guestPhone     String   @default("")
+  adults         Int      @default(1)
+  children       Int      @default(0)
+  amountCents    Int
+  currency       String
+  gateway        String // stripe | moneris
+  status         String   @default("pending") // pending | completed | rejected | expired
+  bookingId      String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([organizationId])
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -4,6 +4,7 @@ import { logger } from '../lib/logger';
 import { constructWebhookEvent, stripeConfigured } from '../lib/stripe';
 import { activateAccelerator } from '../lib/accelerator';
 import { syncConnectAccountFromWebhook } from '../lib/connect';
+import { finalizePaidDirectBooking } from './public';
 
 const log = logger('stripe-webhook');
 export const stripeWebhookRouter = Router();
@@ -36,6 +37,11 @@ stripeWebhookRouter.post('/', async (req, res) => {
       case 'checkout.session.completed': {
         const metadata = (obj.metadata as Record<string, string>) ?? {};
         const organizationId = (obj.client_reference_id as string) ?? metadata.organizationId;
+
+        if (metadata.type === 'direct_booking' && metadata.checkoutRef) {
+          await finalizePaidDirectBooking(metadata.checkoutRef, (obj.payment_intent as string) ?? obj.id as string);
+          break;
+        }
 
         if (metadata.type === 'accelerator' && organizationId) {
           await activateAccelerator(organizationId, {

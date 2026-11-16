@@ -219,6 +219,15 @@ async function main() {
       },
     });
 
+    // Every property gets a working, published booking page by default (matches
+    // what property creation does outside the seed too) — the Seaside-specific block
+    // below overrides this with richer SEO content for that one property.
+    await prisma.propertySeo.upsert({
+      where: { propertyId: property.id },
+      update: {},
+      create: { propertyId: property.id, metaTitle: property.name, published: true },
+    });
+
     for (const r of spec.rooms) {
       const room = await prisma.roomType.upsert({
         where: { propertyId_code: { propertyId: property.id, code: r.code } },
@@ -525,10 +534,16 @@ async function main() {
     });
   }
 
-  // ── SEO / GEO / AEO — publish Seaside's public microsite ────────────────
+  // ── SEO / GEO / AEO — richer SEO content for Seaside's public microsite, overriding
+  // the generic default every property already got above ──────────────────
   await prisma.propertySeo.upsert({
     where: { propertyId: seaside.id },
-    update: {},
+    update: {
+      metaTitle: 'Seaside Boutique Hotel — San Diego Ocean-View Rooms',
+      metaDescription: 'Book direct at Seaside Boutique Hotel in San Diego — ocean-view rooms and suites, best-rate guarantee, free cancellation.',
+      keywords: ['san diego hotel', 'ocean view hotel san diego', 'boutique hotel california'],
+      published: true,
+    },
     create: {
       propertyId: seaside.id,
       metaTitle: 'Seaside Boutique Hotel — San Diego Ocean-View Rooms',

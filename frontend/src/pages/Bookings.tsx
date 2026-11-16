@@ -176,6 +176,9 @@ function BookingDrawer({ id, onClose }: { id: string; onClose: () => void }) {
   const b = data?.booking as
     | (Record<string, unknown> & {
         guestName: string;
+        guestPhone: string;
+        adults: number;
+        children: number;
         status: string;
         externalRef: string;
         checkIn: string;
@@ -211,6 +214,11 @@ function BookingDrawer({ id, onClose }: { id: string; onClose: () => void }) {
             <Field label="Room" value={b.roomType?.name ?? 'unmapped'} />
             <Field label="Amount" value={money(Number(b.amount), b.currency)} />
             <Field label="Nights" value={String(b.nights.length)} />
+            <Field
+              label="Guests"
+              value={`${b.adults} adult${b.adults === 1 ? '' : 's'}${b.children > 0 ? `, ${b.children} child${b.children === 1 ? '' : 'ren'}` : ''}`}
+            />
+            <Field label="Phone" value={b.guestPhone || '—'} />
           </div>
 
           {data?.conflicts && data.conflicts.length > 0 && (

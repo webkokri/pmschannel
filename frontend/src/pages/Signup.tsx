@@ -27,7 +27,7 @@ export function SignupPage() {
   const nav = useNavigate();
   const { data, isLoading } = useQuery({
     queryKey: ['public-plans'],
-    queryFn: () => api<{ plans: Plan[] }>('/plans'),
+    queryFn: () => api<{ plans: Plan[]; signupEnabled: boolean }>('/plans'),
   });
 
   const [planCode, setPlanCode] = useState<string>('');
@@ -59,6 +59,23 @@ export function SignupPage() {
       setBusy(false);
     }
   };
+
+  if (!isLoading && data?.signupEnabled === false) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-gradient-to-br from-slate-100 to-slate-200 p-4 dark:from-slate-950 dark:to-slate-900">
+        <div className="card w-full max-w-sm p-7 text-center">
+          <Wordmark className="mb-4 justify-center text-lg" />
+          <p className="font-medium">New signups are currently closed.</p>
+          <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
+            If you were invited to join an existing account, ask that organization's admin to add you from Staff settings.
+          </p>
+          <Link to="/login" className="mt-4 inline-block font-medium text-brand-500 underline">
+            Back to sign in
+          </Link>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="flex min-h-screen items-center justify-center bg-gradient-to-br from-slate-100 to-slate-200 p-4 dark:from-slate-950 dark:to-slate-900">
