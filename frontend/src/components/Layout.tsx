@@ -28,7 +28,7 @@ const NAV_GROUPS: { label: string | null; items: { to: string; label: string; ic
       { to: '/finance', label: 'Finance', icon: '$' },
       { to: '/accelerator', label: 'Accelerator', icon: '🚀' },
       { to: '/reports', label: 'Reports', icon: '▤' },
-      { to: '/seo', label: 'SEO / Public page', icon: '🌐' },
+      { to: '/seo', label: 'Website & booking page', icon: '🌐' },
     ],
   },
   {

@@ -239,6 +239,7 @@ model Property {
   pricingRules       PricingRule[]
   seo                PropertySeo?
   faqs               PropertyFaq[]
+  pageContent        PropertyPageContent?
 
   @@index([organizationId])
 }
@@ -845,6 +846,26 @@ model PropertySeo {
   ogImageUrl      String   @default("")
   published       Boolean  @default(false)
   updatedAt       DateTime @updatedAt
+}
+
+/// The property's public booking page as a set of designer-editable content blocks —
+/// a page builder, not freeform HTML. Editing this is restricted to the organization's
+/// `admin` role (enforced in `modules/page-builder.ts`), same as other org-wide,
+/// customer-facing settings. `sections` holds an ordered array of
+/// `{ id, heading, body }` custom blocks the admin adds beneath the built-in ones.
+model PropertyPageContent {
+  id               String   @id @default(cuid())
+  propertyId       String   @unique
+  property         Property @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+  heroHeadline     String   @default("")
+  heroSubheadline  String   @default("")
+  heroImageUrl     String   @default("")
+  primaryColor     String   @default("#356ef4")
+  aboutText        String   @default("")
+  amenities        String[] @default([])
+  galleryImageUrls String[] @default([])
+  sections         Json     @default("[]")
+  updatedAt        DateTime @updatedAt
 }
 
 model PropertyFaq {

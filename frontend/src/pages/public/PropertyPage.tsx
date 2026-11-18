@@ -17,12 +17,28 @@ interface RoomType {
   basePrice: number;
   calendar: CalendarDay[];
 }
+interface PageSection {
+  id: string;
+  heading: string;
+  body: string;
+}
+interface PageContent {
+  heroHeadline: string;
+  heroSubheadline: string;
+  heroImageUrl: string;
+  primaryColor: string;
+  aboutText: string;
+  amenities: string[];
+  galleryImageUrls: string[];
+  sections: PageSection[];
+}
 interface PublicProperty {
   paymentGateway: { configured: boolean; name: string };
   property: { code: string; name: string; city: string; region: string; country: string; currency: string };
   seo: { metaTitle: string; metaDescription: string; keywords: string[]; ogImageUrl: string };
   faqs: { question: string; answer: string }[];
   roomTypes: RoomType[];
+  pageContent: PageContent | null;
 }
 
 async function fetchPublic(code: string): Promise<PublicProperty> {
@@ -71,6 +87,7 @@ type CheckoutState =
 
 export function PublicPropertyPage() {
   const { code = '' } = useParams();
+  const embedded = new URLSearchParams(window.location.search).get('embed') === '1';
   const { data, isLoading, error } = useQuery({
     queryKey: ['public-property', code],
     queryFn: () => fetchPublic(code),
@@ -159,6 +176,18 @@ export function PublicPropertyPage() {
     }, 2000);
     return () => clearInterval(timer);
   }, [checkout]);
+
+  // When actually embedded in another page's iframe (via the widget script), keep the
+  // parent informed of our real content height so it can size the iframe to fit —
+  // otherwise the host page is stuck guessing a fixed height up front.
+  useEffect(() => {
+    if (window.parent === window) return;
+    const report = () => window.parent.postMessage({ type: 'cm-resize', height: document.body.scrollHeight }, '*');
+    report();
+    const observer = new ResizeObserver(report);
+    observer.observe(document.body);
+    return () => observer.disconnect();
+  }, [data, searched, roomId, checkout]);
 
   const nights = useMemo(() => {
     if (!checkIn || !checkOut) return 0;
@@ -268,17 +297,51 @@ export function PublicPropertyPage() {
     );
   }
 
+  const page = data.pageContent;
+  const accent = page?.primaryColor || '#356ef4';
+
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 dark:bg-slate-950 dark:text-slate-100">
-      <header className="border-b border-slate-200 bg-white px-4 py-4 dark:border-slate-800 dark:bg-slate-900">
-        <Wordmark className="text-base" />
-      </header>
+      {!embedded && (
+        <header className="border-b border-slate-200 bg-white px-4 py-4 dark:border-slate-800 dark:bg-slate-900">
+          <Wordmark className="text-base" />
+        </header>
+      )}
+
+      {page?.heroImageUrl && (
+        <div
+          className="flex min-h-[260px] items-end bg-cover bg-center px-4 py-10 text-white"
+          style={{ backgroundImage: `linear-gradient(0deg, rgba(0,0,0,0.55), rgba(0,0,0,0.15)), url(${page.heroImageUrl})` }}
+        >
+          <div className="mx-auto w-full max-w-4xl">
+            <h1 className="text-3xl font-bold">{page.heroHeadline || data.property.name}</h1>
+            {page.heroSubheadline && <p className="mt-1 text-white/90">{page.heroSubheadline}</p>}
+          </div>
+        </div>
+      )}
 
       <main className="mx-auto max-w-4xl px-4 py-8">
-        <h1 className="text-2xl font-bold">{data.property.name}</h1>
+        {!page?.heroImageUrl && (
+          <>
+            <h1 className="text-2xl font-bold">{page?.heroHeadline || data.property.name}</h1>
+            {page?.heroSubheadline && <p className="text-slate-500">{page.heroSubheadline}</p>}
+          </>
+        )}
         <p className="text-slate-500">
           {data.property.city}, {data.property.region}, {data.property.country}
         </p>
+
+        {page?.aboutText && <p className="mt-4 whitespace-pre-line text-slate-600 dark:text-slate-300">{page.aboutText}</p>}
+
+        {page && page.amenities.length > 0 && (
+          <div className="mt-4 flex flex-wrap gap-1.5">
+            {page.amenities.map((a, i) => (
+              <span key={i} className="badge bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300">
+                {a}
+              </span>
+            ))}
+          </div>
+        )}
 
         {checkout.phase !== 'idle' ? (
           <CheckoutStatusPanel state={checkout} />
@@ -328,7 +391,7 @@ export function PublicPropertyPage() {
                   onChange={(e) => setChildren(Math.max(0, Number(e.target.value)))}
                 />
               </div>
-              <button className="btn-primary" type="submit">
+              <button className="btn-primary" type="submit" style={{ backgroundColor: accent, borderColor: accent }}>
                 Search availability
               </button>
             </form>
@@ -405,7 +468,7 @@ export function PublicPropertyPage() {
                     {freeResult.message}
                   </p>
                 )}
-                <button className="btn-primary w-full" disabled={submitting}>
+                <button className="btn-primary w-full" disabled={submitting} style={{ backgroundColor: accent, borderColor: accent }}>
                   {submitting
                     ? 'Starting checkout…'
                     : data.paymentGateway.configured
@@ -420,6 +483,21 @@ export function PublicPropertyPage() {
           </>
         )}
 
+        {page && page.galleryImageUrls.length > 0 && (
+          <div className="mt-10 grid grid-cols-2 gap-2 sm:grid-cols-3">
+            {page.galleryImageUrls.map((url, i) => (
+              <img key={i} src={url} alt="" className="aspect-square w-full rounded-lg object-cover" loading="lazy" />
+            ))}
+          </div>
+        )}
+
+        {page?.sections.map((s) => (
+          <div key={s.id} className="mt-10">
+            {s.heading && <h2 className="mb-2 text-lg font-semibold">{s.heading}</h2>}
+            <p className="whitespace-pre-line text-slate-600 dark:text-slate-300">{s.body}</p>
+          </div>
+        ))}
+
         {data.faqs.length > 0 && (
           <div className="mt-10">
             <h2 className="mb-3 text-lg font-semibold">Frequently asked questions</h2>
@@ -433,6 +511,8 @@ export function PublicPropertyPage() {
             </div>
           </div>
         )}
+
+        {embedded && <p className="mt-10 text-center text-xs text-slate-400">Powered by ChannelManager</p>}
       </main>
     </div>
   );

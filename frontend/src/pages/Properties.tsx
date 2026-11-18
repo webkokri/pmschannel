@@ -147,12 +147,12 @@ export function PropertiesPage() {
               <p className="text-amber-500">This property's booking page isn't published yet — publish it from SEO below.</p>
             )}
             <p className="mt-2 text-xs text-slate-400">
-              Anyone with this link can search dates and book — it never requires staff login. Full SEO content, FAQs, and
-              the embed code for your own website are in the{' '}
+              Anyone with this link can search dates and book — it never requires staff login. Design the page content,
+              SEO, FAQs, and get the embed code for your own website from{' '}
               <Link to="/seo" className="underline">
-                SEO / GEO / AEO
-              </Link>{' '}
-              page.
+                Website &amp; booking page
+              </Link>
+              .
             </p>
           </div>
 

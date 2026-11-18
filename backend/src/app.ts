@@ -28,6 +28,7 @@ import { reportsRouter } from './modules/reports';
 import { pmsRouter } from './modules/pms';
 import { rmsRouter } from './modules/rms';
 import { seoRouter } from './modules/seo';
+import { pageBuilderRouter } from './modules/page-builder';
 import { aiRouter } from './modules/ai';
 import { connectRouter } from './modules/connect';
 import { acceleratorRouter } from './modules/accelerator';
@@ -87,6 +88,7 @@ export function createApp() {
   app.use('/api/pms', pmsRouter);
   app.use('/api/rms', rmsRouter);
   app.use('/api/seo', seoRouter);
+  app.use('/api/page-builder', pageBuilderRouter);
   app.use('/api/ai', aiRouter);
   app.use('/api/connect', connectRouter);
   app.use('/api/accelerator', acceleratorRouter);

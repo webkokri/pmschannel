@@ -111,6 +111,7 @@ publicRouter.get(
         seo: true,
         faqs: { orderBy: { sortOrder: 'asc' } },
         roomTypes: { orderBy: { name: 'asc' } },
+        pageContent: true,
       },
     });
     if (!property || !property.active || !property.seo?.published) throw notFound('Property not found');
@@ -145,6 +146,18 @@ publicRouter.get(
         ogImageUrl: property.seo.ogImageUrl,
       },
       faqs: property.faqs.map((f) => ({ question: f.question, answer: f.answer })),
+      pageContent: property.pageContent
+        ? {
+            heroHeadline: property.pageContent.heroHeadline,
+            heroSubheadline: property.pageContent.heroSubheadline,
+            heroImageUrl: property.pageContent.heroImageUrl,
+            primaryColor: property.pageContent.primaryColor,
+            aboutText: property.pageContent.aboutText,
+            amenities: property.pageContent.amenities,
+            galleryImageUrls: property.pageContent.galleryImageUrls,
+            sections: property.pageContent.sections as { id: string; heading: string; body: string }[],
+          }
+        : null,
       roomTypes: property.roomTypes.map((r) => ({
         id: r.id,
         name: r.name,
@@ -350,6 +363,57 @@ publicRouter.post(
     await finalizePaidDirectBooking(pending.id, `${receipt.orderId}|${receipt.txnNumber}`);
     const after = await prisma.pendingDirectBooking.findUniqueOrThrow({ where: { id: pending.id } });
     res.json({ status: after.status, bookingId: after.bookingId });
+  }),
+);
+
+/**
+ * The embeddable booking-widget loader — a generic, property-agnostic script a hotel
+ * pastes once into their own site (alongside a marker `<div data-cm-booking-widget="CODE">`).
+ * It builds an iframe pointed at that property's `/book/:code?embed=1` page and keeps it
+ * sized to its content via `postMessage`, so the embed blends into the host page instead
+ * of needing a fixed height guessed up front. Served from here (not a static file) so its
+ * origin always matches whatever `PUBLIC_APP_URL` this server is actually running as.
+ */
+publicRouter.get(
+  '/widget.js',
+  asyncHandler(async (_req, res) => {
+    const appOrigin = env.publicAppUrl;
+    const js = `(function () {
+  var ORIGIN = ${JSON.stringify(appOrigin)};
+  function mount(el) {
+    var code = el.getAttribute('data-cm-booking-widget');
+    if (!code || el.querySelector('iframe[data-cm-booking-iframe]')) return;
+    var iframe = document.createElement('iframe');
+    iframe.setAttribute('data-cm-booking-iframe', '1');
+    iframe.src = ORIGIN + '/book/' + encodeURIComponent(code) + '?embed=1';
+    iframe.style.width = '100%';
+    iframe.style.border = '0';
+    iframe.style.minHeight = '640px';
+    iframe.style.display = 'block';
+    iframe.setAttribute('loading', 'lazy');
+    iframe.setAttribute('title', 'Book now');
+    el.appendChild(iframe);
+    window.addEventListener('message', function (e) {
+      if (e.origin !== ORIGIN) return;
+      if (e.source !== iframe.contentWindow) return;
+      if (e.data && e.data.type === 'cm-resize' && typeof e.data.height === 'number') {
+        iframe.style.height = Math.max(320, e.data.height) + 'px';
+      }
+    });
+  }
+  function mountAll() {
+    var els = document.querySelectorAll('[data-cm-booking-widget]');
+    for (var i = 0; i < els.length; i++) mount(els[i]);
+  }
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', mountAll);
+  } else {
+    mountAll();
+  }
+})();`;
+    res.setHeader('content-type', 'application/javascript; charset=utf-8');
+    res.setHeader('cache-control', 'public, max-age=300');
+    res.send(js);
   }),
 );
 
