@@ -4,7 +4,7 @@ import { addDays, nightsBetween, todayIso } from '@cm/shared';
 import { prisma } from '../db';
 import { asyncHandler, badRequest, notFound, parse } from '../lib/http';
 import { requireRole } from '../auth';
-import { requireOrg, assertOwned } from '../lib/tenant';
+import { assertOwned, assertPropertyInScope, requireOrg } from '../lib/tenant';
 import { enqueueAriForEdit } from '../engine/ari';
 
 export const calendarRouter = Router();
@@ -19,7 +19,7 @@ calendarRouter.get(
   asyncHandler(async (req, res) => {
     const propertyId = String(req.query.propertyId ?? '');
     if (!propertyId) throw badRequest('propertyId is required');
-    await assertOwned(() => prisma.property.findUnique({ where: { id: propertyId } }), req.user!.organizationId!, 'Property');
+    await assertOwned(() => prisma.property.findUnique({ where: { id: propertyId } }), req.user!.organizationId!, 'Property', req);
     const from = String(req.query.from ?? todayIso());
     const days = Math.min(90, Math.max(1, Number(req.query.days ?? 30)));
     const to = addDays(from, days);
@@ -104,6 +104,7 @@ calendarRouter.patch(
       include: { property: { select: { organizationId: true } } },
     });
     if (!room || room.property.organizationId !== req.user!.organizationId) throw notFound('Room type not found');
+    assertPropertyInScope(room.propertyId, req);
 
     const allDates = nightsBetween(body.from, body.to);
     const dates = body.weekdays

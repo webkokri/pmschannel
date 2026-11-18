@@ -4,12 +4,11 @@ import { z } from 'zod';
 import { prisma } from '../db';
 import { asyncHandler, notFound, parse } from '../lib/http';
 import { requireRole } from '../auth';
-import { requireOrg } from '../lib/tenant';
-import { assertWithinLimit } from '../lib/limits';
+import { requireOrg, requirePortfolioStaff } from '../lib/tenant';
 import { getSettings, updateSettings } from '../lib/settings';
 
 export const usersRouter = Router();
-usersRouter.use(requireOrg);
+usersRouter.use(requireOrg, requirePortfolioStaff);
 
 usersRouter.get(
   '/',
@@ -38,7 +37,6 @@ usersRouter.post(
   asyncHandler(async (req, res) => {
     const organizationId = req.user!.organizationId!;
     const body = parse(userInput.extend({ password: z.string().min(8) }), req.body);
-    await assertWithinLimit(organizationId, 'users');
     const user = await prisma.user.create({
       data: {
         organizationId,
@@ -118,6 +116,7 @@ const settingsInput = z
 settingsRouter.patch(
   '/',
   requireRole('admin'),
+  requirePortfolioStaff,
   asyncHandler(async (req, res) => {
     const body = parse(settingsInput, req.body);
     res.json({ settings: await updateSettings(req.user!.organizationId!, body) });

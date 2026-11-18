@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { addDays, todayIso } from '@cm/shared';
 import { prisma } from '../db';
 import { asyncHandler, parse } from '../lib/http';
-import { requireOrg, assertOwned } from '../lib/tenant';
+import { assertOwned, assertPropertyInScope, propertyScope, requireOrg, resolvePropertyFilter } from '../lib/tenant';
 import { requireRole } from '../auth';
 import { requirePermission } from '../lib/permissions';
 import { applyPricingRules } from '../engine/pricing';
@@ -15,7 +15,7 @@ rmsRouter.get(
   '/rules',
   asyncHandler(async (req, res) => {
     const organizationId = req.user!.organizationId!;
-    const propertyId = req.query.propertyId ? String(req.query.propertyId) : undefined;
+    const propertyId = resolvePropertyFilter(req, req.query.propertyId ? String(req.query.propertyId) : undefined);
     const rules = await prisma.pricingRule.findMany({
       where: { organizationId, propertyId },
       orderBy: { priority: 'asc' },
@@ -42,7 +42,7 @@ rmsRouter.post(
   asyncHandler(async (req, res) => {
     const organizationId = req.user!.organizationId!;
     const body = parse(ruleInput, req.body);
-    await assertOwned(() => prisma.property.findUnique({ where: { id: body.propertyId } }), organizationId, 'Property');
+    await assertOwned(() => prisma.property.findUnique({ where: { id: body.propertyId } }), organizationId, 'Property', req);
     const rule = await prisma.pricingRule.create({ data: { ...body, organizationId } });
     res.status(201).json({ rule });
   }),
@@ -53,7 +53,7 @@ rmsRouter.patch(
   requirePermission('rms.manage'),
   asyncHandler(async (req, res) => {
     const organizationId = req.user!.organizationId!;
-    await assertOwned(() => prisma.pricingRule.findUnique({ where: { id: req.params.id } }), organizationId, 'Pricing rule');
+    await assertOwned(() => prisma.pricingRule.findUnique({ where: { id: req.params.id } }), organizationId, 'Pricing rule', req);
     const body = parse(ruleInput.partial().omit({ propertyId: true }), req.body);
     const rule = await prisma.pricingRule.update({ where: { id: req.params.id }, data: body });
     res.json({ rule });
@@ -65,7 +65,7 @@ rmsRouter.delete(
   requirePermission('rms.manage'),
   asyncHandler(async (req, res) => {
     const organizationId = req.user!.organizationId!;
-    await assertOwned(() => prisma.pricingRule.findUnique({ where: { id: req.params.id } }), organizationId, 'Pricing rule');
+    await assertOwned(() => prisma.pricingRule.findUnique({ where: { id: req.params.id } }), organizationId, 'Pricing rule', req);
     await prisma.pricingRule.delete({ where: { id: req.params.id } });
     res.status(204).end();
   }),
@@ -84,7 +84,7 @@ rmsRouter.post(
   asyncHandler(async (req, res) => {
     const organizationId = req.user!.organizationId!;
     const body = parse(applyInput, req.body);
-    await assertOwned(() => prisma.property.findUnique({ where: { id: body.propertyId } }), organizationId, 'Property');
+    await assertOwned(() => prisma.property.findUnique({ where: { id: body.propertyId } }), organizationId, 'Property', req);
     const result = await applyPricingRules(organizationId, body.propertyId, {
       roomTypeId: body.roomTypeId,
       from: body.from,
@@ -99,8 +99,16 @@ rmsRouter.get(
   asyncHandler(async (req, res) => {
     const organizationId = req.user!.organizationId!;
     const roomTypeId = req.query.roomTypeId ? String(req.query.roomTypeId) : undefined;
+    if (roomTypeId) {
+      const room = await prisma.roomType.findUnique({ where: { id: roomTypeId }, select: { propertyId: true } });
+      if (room) assertPropertyInScope(room.propertyId, req);
+    }
+    const scope = propertyScope(req);
+    const roomTypeIds = scope
+      ? (await prisma.roomType.findMany({ where: { propertyId: scope }, select: { id: true } })).map((r) => r.id)
+      : undefined;
     const logs = await prisma.pricingLog.findMany({
-      where: { organizationId, roomTypeId },
+      where: { organizationId, roomTypeId: roomTypeId ?? (roomTypeIds ? { in: roomTypeIds } : undefined) },
       orderBy: { createdAt: 'desc' },
       take: 200,
     });

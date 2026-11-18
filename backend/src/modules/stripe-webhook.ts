@@ -1,8 +1,6 @@
 import { Router } from 'express';
-import { prisma } from '../db';
 import { logger } from '../lib/logger';
 import { constructWebhookEvent, stripeConfigured } from '../lib/stripe';
-import { activateAccelerator } from '../lib/accelerator';
 import { syncConnectAccountFromWebhook } from '../lib/connect';
 import { finalizePaidDirectBooking } from './public';
 
@@ -10,9 +8,10 @@ const log = logger('stripe-webhook');
 export const stripeWebhookRouter = Router();
 
 /**
- * Stripe calls this to keep `Subscription`/`Invoice` in sync. Mounted with
- * `express.raw()` (see app.ts) so the signature can be verified against the exact bytes
- * Stripe sent. No-ops with 200 if Stripe isn't configured, so it's safe to leave wired.
+ * Stripe calls this for guest-payment checkout completion and Connect account status
+ * changes. Mounted with `express.raw()` (see app.ts) so the signature can be verified
+ * against the exact bytes Stripe sent. No-ops with 200 if Stripe isn't configured, so
+ * it's safe to leave wired.
  *
  * Not exercised against a real Stripe account in this build — verify event shapes
  * against the Stripe dashboard's webhook log once you have live credentials.
@@ -36,37 +35,8 @@ stripeWebhookRouter.post('/', async (req, res) => {
     switch (event.type) {
       case 'checkout.session.completed': {
         const metadata = (obj.metadata as Record<string, string>) ?? {};
-        const organizationId = (obj.client_reference_id as string) ?? metadata.organizationId;
-
         if (metadata.type === 'direct_booking' && metadata.checkoutRef) {
           await finalizePaidDirectBooking(metadata.checkoutRef, (obj.payment_intent as string) ?? obj.id as string);
-          break;
-        }
-
-        if (metadata.type === 'accelerator' && organizationId) {
-          await activateAccelerator(organizationId, {
-            priceCentsPaid: (obj.amount_total as number) ?? undefined,
-            stripePaymentIntentId: (obj.payment_intent as string) ?? undefined,
-          });
-          break;
-        }
-
-        const planCode = metadata.planCode;
-        if (organizationId && planCode) {
-          const plan = await prisma.plan.findUnique({ where: { code: planCode } });
-          if (plan) {
-            await prisma.subscription.update({
-              where: { organizationId },
-              data: {
-                planId: plan.id,
-                status: 'active',
-                pendingPlanId: null,
-                stripeCustomerId: (obj.customer as string) ?? undefined,
-                stripeSubscriptionId: (obj.subscription as string) ?? undefined,
-              },
-            });
-            await prisma.organization.update({ where: { id: organizationId }, data: { status: 'active' } });
-          }
         }
         break;
       }
@@ -75,42 +45,6 @@ stripeWebhookRouter.post('/', async (req, res) => {
         const chargesEnabled = Boolean(obj.charges_enabled);
         const requirements = obj.requirements as { disabled_reason?: string } | undefined;
         await syncConnectAccountFromWebhook(accountId, chargesEnabled, requirements?.disabled_reason ?? null);
-        break;
-      }
-      case 'invoice.paid': {
-        const stripeCustomerId = obj.customer as string;
-        const sub = await prisma.subscription.findFirst({ where: { stripeCustomerId } });
-        if (sub) {
-          await prisma.invoice.create({
-            data: {
-              organizationId: sub.organizationId,
-              subscriptionId: sub.id,
-              amountCents: (obj.amount_paid as number) ?? 0,
-              currency: ((obj.currency as string) ?? 'usd').toUpperCase(),
-              status: 'paid',
-              paidAt: new Date(),
-              stripeInvoiceId: obj.id as string,
-            },
-          });
-        }
-        break;
-      }
-      case 'invoice.payment_failed': {
-        const stripeCustomerId = obj.customer as string;
-        const sub = await prisma.subscription.findFirst({ where: { stripeCustomerId } });
-        if (sub) {
-          await prisma.subscription.update({ where: { id: sub.id }, data: { status: 'past_due' } });
-          await prisma.organization.update({ where: { id: sub.organizationId }, data: { status: 'past_due' } });
-        }
-        break;
-      }
-      case 'customer.subscription.deleted': {
-        const stripeSubscriptionId = obj.id as string;
-        const sub = await prisma.subscription.findFirst({ where: { stripeSubscriptionId } });
-        if (sub) {
-          await prisma.subscription.update({ where: { id: sub.id }, data: { status: 'canceled' } });
-          await prisma.organization.update({ where: { id: sub.organizationId }, data: { status: 'canceled' } });
-        }
         break;
       }
       default:

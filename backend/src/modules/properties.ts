@@ -1,10 +1,9 @@
-import { Router } from 'express';
+import { Router, type Request } from 'express';
 import { z } from 'zod';
 import { prisma } from '../db';
 import { asyncHandler, notFound, parse } from '../lib/http';
 import { requireRole } from '../auth';
-import { requireOrg, assertOwned } from '../lib/tenant';
-import { assertWithinLimit } from '../lib/limits';
+import { assertOwned, assertPropertyInScope, propertyScope, requireOrg, requirePortfolioStaff } from '../lib/tenant';
 
 export const propertiesRouter = Router();
 propertiesRouter.use(requireOrg);
@@ -24,8 +23,9 @@ const propertyInput = z.object({
 propertiesRouter.get(
   '/',
   asyncHandler(async (req, res) => {
+    const scope = propertyScope(req);
     const properties = await prisma.property.findMany({
-      where: { organizationId: req.user!.organizationId! },
+      where: { organizationId: req.user!.organizationId!, ...(scope ? { id: scope } : {}) },
       orderBy: { name: 'asc' },
       include: {
         _count: { select: { roomTypes: true, channelConnections: true, bookings: true } },
@@ -38,6 +38,7 @@ propertiesRouter.get(
 propertiesRouter.get(
   '/:id',
   asyncHandler(async (req, res) => {
+    assertPropertyInScope(req.params.id, req);
     const property = await prisma.property.findUnique({
       where: { id: req.params.id },
       include: {
@@ -57,10 +58,10 @@ propertiesRouter.get(
 propertiesRouter.post(
   '/',
   requireRole('manager'),
+  requirePortfolioStaff,
   asyncHandler(async (req, res) => {
     const organizationId = req.user!.organizationId!;
     const body = parse(propertyInput, req.body);
-    await assertWithinLimit(organizationId, 'properties');
     const property = await prisma.property.create({ data: { ...body, organizationId } });
     // Every property gets a working, published booking page from the moment it's
     // created — no separate "publish" step to remember. Settings → SEO still lets staff
@@ -77,7 +78,7 @@ propertiesRouter.patch(
   requireRole('manager'),
   asyncHandler(async (req, res) => {
     const organizationId = req.user!.organizationId!;
-    await assertOwned(() => prisma.property.findUnique({ where: { id: req.params.id } }), organizationId, 'Property');
+    await assertOwned(() => prisma.property.findUnique({ where: { id: req.params.id } }), organizationId, 'Property', req);
     const body = parse(propertyInput.partial(), req.body);
     const property = await prisma.property.update({ where: { id: req.params.id }, data: body });
     res.json({ property });
@@ -87,9 +88,10 @@ propertiesRouter.patch(
 propertiesRouter.delete(
   '/:id',
   requireRole('admin'),
+  requirePortfolioStaff,
   asyncHandler(async (req, res) => {
     const organizationId = req.user!.organizationId!;
-    await assertOwned(() => prisma.property.findUnique({ where: { id: req.params.id } }), organizationId, 'Property');
+    await assertOwned(() => prisma.property.findUnique({ where: { id: req.params.id } }), organizationId, 'Property', req);
     await prisma.property.delete({ where: { id: req.params.id } });
     res.status(204).end();
   }),
@@ -112,8 +114,7 @@ propertiesRouter.post(
   asyncHandler(async (req, res) => {
     const organizationId = req.user!.organizationId!;
     const body = parse(roomTypeInput, req.body);
-    await assertOwned(() => prisma.property.findUnique({ where: { id: body.propertyId } }), organizationId, 'Property');
-    await assertWithinLimit(organizationId, 'roomTypesPerProperty', { propertyId: body.propertyId });
+    await assertOwned(() => prisma.property.findUnique({ where: { id: body.propertyId } }), organizationId, 'Property', req);
     const roomType = await prisma.roomType.create({ data: body });
     res.status(201).json({ roomType });
   }),
@@ -129,6 +130,7 @@ propertiesRouter.patch(
       include: { property: { select: { organizationId: true } } },
     });
     if (!existing || existing.property.organizationId !== organizationId) throw notFound('Room type not found');
+    assertPropertyInScope(existing.propertyId, req);
     const body = parse(roomTypeInput.partial().omit({ propertyId: true }), req.body);
     const roomType = await prisma.roomType.update({ where: { id: req.params.id }, data: body });
     res.json({ roomType });
@@ -145,6 +147,7 @@ propertiesRouter.delete(
       include: { property: { select: { organizationId: true } } },
     });
     if (!existing || existing.property.organizationId !== organizationId) throw notFound('Room type not found');
+    assertPropertyInScope(existing.propertyId, req);
     await prisma.roomType.delete({ where: { id: req.params.id } });
     res.status(204).end();
   }),
@@ -163,12 +166,13 @@ const ratePlanInput = z.object({
   adjustFlat: z.number().default(0),
 });
 
-async function assertRoomTypeOwned(roomTypeId: string, organizationId: string) {
+async function assertRoomTypeOwned(roomTypeId: string, organizationId: string, req: Request) {
   const room = await prisma.roomType.findUnique({
     where: { id: roomTypeId },
     include: { property: { select: { organizationId: true } } },
   });
   if (!room || room.property.organizationId !== organizationId) throw notFound('Room type not found');
+  assertPropertyInScope(room.propertyId, req);
   return room;
 }
 
@@ -177,7 +181,7 @@ propertiesRouter.post(
   requireRole('manager'),
   asyncHandler(async (req, res) => {
     const body = parse(ratePlanInput, req.body);
-    await assertRoomTypeOwned(body.roomTypeId, req.user!.organizationId!);
+    await assertRoomTypeOwned(body.roomTypeId, req.user!.organizationId!, req);
     const ratePlan = await prisma.ratePlan.create({ data: body });
     res.status(201).json({ ratePlan });
   }),
@@ -194,6 +198,7 @@ propertiesRouter.patch(
     if (!existing || existing.roomType.property.organizationId !== req.user!.organizationId) {
       throw notFound('Rate plan not found');
     }
+    assertPropertyInScope(existing.roomType.propertyId, req);
     const body = parse(ratePlanInput.partial().omit({ roomTypeId: true }), req.body);
     const ratePlan = await prisma.ratePlan.update({ where: { id: req.params.id }, data: body });
     res.json({ ratePlan });
@@ -211,6 +216,7 @@ propertiesRouter.delete(
     if (!existing || existing.roomType.property.organizationId !== req.user!.organizationId) {
       throw notFound('Rate plan not found');
     }
+    assertPropertyInScope(existing.roomType.propertyId, req);
     await prisma.ratePlan.delete({ where: { id: req.params.id } });
     res.status(204).end();
   }),

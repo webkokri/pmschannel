@@ -5,8 +5,7 @@ import { useAuth } from '@/lib/auth';
 
 const NAV = [
   { to: '/admin', label: 'Overview', icon: '▚', end: true },
-  { to: '/admin/organizations', label: 'Organizations', icon: '⌂' },
-  { to: '/admin/plans', label: 'Plans', icon: '$' },
+  { to: '/admin/organizations', label: 'Properties', icon: '⌂' },
   { to: '/admin/channels', label: 'OTA Catalogue', icon: '⇄' },
   { to: '/admin/settings', label: 'Platform Settings', icon: '⚑' },
 ];

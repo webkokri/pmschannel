@@ -16,8 +16,6 @@ import { syncRouter } from './modules/sync';
 import { dashboardRouter } from './modules/dashboard';
 import { simulatorRouter } from './modules/simulator';
 import { usersRouter, settingsRouter } from './modules/users';
-import { billingRouter } from './modules/billing';
-import { plansRouter } from './modules/plans';
 import { organizationRouter } from './modules/organization';
 import { financeRouter } from './modules/finance';
 import { packagesRouter } from './modules/packages';
@@ -37,7 +35,7 @@ import { icalExportRouter } from './modules/ical-export';
 import { webhookRouter } from './engine/webhooks';
 import { stripeWebhookRouter } from './modules/stripe-webhook';
 import { adminOrganizationsRouter } from './modules/admin/organizations';
-import { adminPlansRouter } from './modules/admin/plans';
+import { adminPropertiesRouter } from './modules/admin/properties';
 import { adminPlatformRouter } from './modules/admin/platform';
 
 export function createApp() {
@@ -55,10 +53,9 @@ export function createApp() {
   app.get('/health', (_req, res) => res.json({ ok: true, service: 'channel-manager-api', ts: new Date().toISOString() }));
   app.get('/api/ota-catalog', (_req, res) => res.json({ catalog: OTA_CATALOG }));
 
-  // Public: OTA booking webhooks, the plan catalogue, auth (login/signup), and the
-  // public booking microsite (SEO/GEO/AEO surface — read-only + "create a booking").
+  // Public: OTA booking webhooks, auth (login), and the public booking microsite
+  // (SEO/GEO/AEO surface — read-only + "create a booking").
   app.use('/api/webhooks', webhookRouter);
-  app.use('/api/plans', plansRouter);
   app.use('/api/auth', authRouter);
   app.use('/api/public', publicRouter);
   app.use('/api/ical', icalExportRouter);
@@ -77,7 +74,6 @@ export function createApp() {
   app.use('/api/simulator', simulatorRouter);
   app.use('/api/users', usersRouter);
   app.use('/api/settings', settingsRouter);
-  app.use('/api/billing', billingRouter);
   app.use('/api/organization', organizationRouter);
   app.use('/api/finance', financeRouter);
   app.use('/api/packages', packagesRouter);
@@ -93,10 +89,10 @@ export function createApp() {
   app.use('/api/connect', connectRouter);
   app.use('/api/accelerator', acceleratorRouter);
 
-  // Platform routes — super admin only, full control of the SaaS.
+  // Platform routes — super admin only, full control of the portfolio.
   app.use('/api/admin', requireSuperAdmin);
   app.use('/api/admin/organizations', adminOrganizationsRouter);
-  app.use('/api/admin/plans', adminPlansRouter);
+  app.use('/api/admin/properties', adminPropertiesRouter);
   app.use('/api/admin/platform', adminPlatformRouter);
 
   app.use('/api', (_req, _res, next) => next(notFound('Route not found')));

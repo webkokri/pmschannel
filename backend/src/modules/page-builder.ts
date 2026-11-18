@@ -31,7 +31,7 @@ pageBuilderRouter.get(
   '/:propertyId',
   asyncHandler(async (req, res) => {
     const organizationId = req.user!.organizationId!;
-    await assertOwned(() => prisma.property.findUnique({ where: { id: req.params.propertyId } }), organizationId, 'Property');
+    await assertOwned(() => prisma.property.findUnique({ where: { id: req.params.propertyId } }), organizationId, 'Property', req);
     const content = await prisma.propertyPageContent.findUnique({ where: { propertyId: req.params.propertyId } });
     res.json({
       content: content
@@ -62,7 +62,7 @@ pageBuilderRouter.put(
   asyncHandler(async (req, res) => {
     const organizationId = req.user!.organizationId!;
     const propertyId = req.params.propertyId;
-    await assertOwned(() => prisma.property.findUnique({ where: { id: propertyId } }), organizationId, 'Property');
+    await assertOwned(() => prisma.property.findUnique({ where: { id: propertyId } }), organizationId, 'Property', req);
     const body = parse(contentInput, req.body);
     const content = await prisma.propertyPageContent.upsert({
       where: { propertyId },

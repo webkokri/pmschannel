@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { addDays, nightsBetween, todayIso } from '@cm/shared';
 import { prisma } from '../db';
 import { asyncHandler, parse } from '../lib/http';
-import { requireOrg } from '../lib/tenant';
+import { requireOrg, resolvePropertyFilter } from '../lib/tenant';
 import { requireRole } from '../auth';
 import { aiConfigured, chat, chatJson } from '../lib/ai/claude';
 
@@ -21,7 +21,10 @@ aiRouter.get(
 async function buildSnapshot(organizationId: string, propertyId?: string) {
   const propFilter = { organizationId, ...(propertyId ? { propertyId } : {}) };
   const [properties, recentBookings, openConflicts, occupancyRooms] = await Promise.all([
-    prisma.property.findMany({ where: { organizationId }, select: { id: true, name: true, code: true } }),
+    prisma.property.findMany({
+      where: { organizationId, ...(propertyId ? { id: propertyId } : {}) },
+      select: { id: true, name: true, code: true },
+    }),
     prisma.booking.findMany({
       where: propFilter,
       orderBy: { receivedAt: 'desc' },
@@ -82,7 +85,7 @@ aiRouter.post(
   asyncHandler(async (req, res) => {
     const organizationId = req.user!.organizationId!;
     const body = parse(chatInput, req.body);
-    const snapshot = await buildSnapshot(organizationId, body.propertyId);
+    const snapshot = await buildSnapshot(organizationId, resolvePropertyFilter(req, body.propertyId));
     const system = `${SYSTEM_PROMPT}\n\nCurrent data snapshot:\n${JSON.stringify(snapshot)}`;
     const result = await chat(body.messages, system);
     res.json({ ok: result.ok, reply: result.text });
@@ -94,6 +97,8 @@ aiRouter.get(
   asyncHandler(async (req, res) => {
     const organizationId = req.user!.organizationId!;
     const status = req.query.status ? String(req.query.status) : undefined;
+    // AiSuggestion carries no propertyId, so this can't be filtered by property —
+    // acceptable here since these are just draft pricing/occupancy notes, not booking data.
     const suggestions = await prisma.aiSuggestion.findMany({
       where: { organizationId, status: status as never },
       orderBy: { createdAt: 'desc' },
@@ -114,7 +119,7 @@ aiRouter.post(
   asyncHandler(async (req, res) => {
     const organizationId = req.user!.organizationId!;
     const body = parse(generateInput, req.body);
-    const snapshot = await buildSnapshot(organizationId, body.propertyId);
+    const snapshot = await buildSnapshot(organizationId, resolvePropertyFilter(req, body.propertyId));
 
     const prompt =
       `Given this hotel occupancy/booking snapshot, suggest 2-4 concrete pricing or occupancy ` +

@@ -1,11 +1,10 @@
 import { Router } from 'express';
 import { z } from 'zod';
-import { OTA_CATEGORIES, type ChannelCategory } from '@cm/shared';
+import { OTA_CATEGORIES } from '@cm/shared';
 import { prisma } from '../db';
 import { asyncHandler, badRequest, notFound, parse } from '../lib/http';
 import { requireRole } from '../auth';
-import { requireOrg, assertOwned } from '../lib/tenant';
-import { assertChannelCategoryAllowed, assertWithinLimit } from '../lib/limits';
+import { assertOwned, assertPropertyInScope, resolvePropertyFilter, requireOrg } from '../lib/tenant';
 import { decryptJson, encryptJson, generateSecret, redactCredentials } from '../lib/crypto';
 import { resolveConnection } from '../connectors/registry';
 import { env } from '../env';
@@ -19,11 +18,15 @@ channelsRouter.get(
   '/',
   asyncHandler(async (req, res) => {
     const organizationId = req.user!.organizationId!;
+    const scope = resolvePropertyFilter(req);
     const channels = await prisma.channel.findMany({
       where: { active: true },
       orderBy: [{ category: 'asc' }, { name: 'asc' }],
       include: {
-        connections: { where: { organizationId }, select: { id: true, enabled: true, status: true, propertyId: true } },
+        connections: {
+          where: { organizationId, ...(scope ? { propertyId: scope } : {}) },
+          select: { id: true, enabled: true, status: true, propertyId: true },
+        },
       },
     });
     res.json({
@@ -84,17 +87,18 @@ async function present(conn: {
   };
 }
 
-async function assertConnectionOwned(id: string, organizationId: string) {
-  return assertOwned(() => prisma.channelConnection.findUnique({ where: { id } }), organizationId, 'Connection');
+async function assertConnectionOwned(id: string, organizationId: string, req: import('express').Request) {
+  return assertOwned(() => prisma.channelConnection.findUnique({ where: { id } }), organizationId, 'Connection', req);
 }
 
 channelsRouter.get(
   '/connections',
   asyncHandler(async (req, res) => {
     const organizationId = req.user!.organizationId!;
+    const propertyId = resolvePropertyFilter(req, req.query.propertyId ? String(req.query.propertyId) : undefined);
     const where = {
       organizationId,
-      ...(req.query.propertyId ? { propertyId: String(req.query.propertyId) } : {}),
+      ...(propertyId ? { propertyId } : {}),
     };
     const connections = await prisma.channelConnection.findMany({
       where,
@@ -112,7 +116,7 @@ channelsRouter.get(
 channelsRouter.get(
   '/connections/:id',
   asyncHandler(async (req, res) => {
-    await assertConnectionOwned(req.params.id, req.user!.organizationId!);
+    await assertConnectionOwned(req.params.id, req.user!.organizationId!, req);
     const conn = await prisma.channelConnection.findUnique({
       where: { id: req.params.id },
       include: {
@@ -134,18 +138,13 @@ channelsRouter.post(
     const body = parse(connectionInput, req.body);
     const { credentials, ...rest } = body;
 
-    await assertOwned(() => prisma.property.findUnique({ where: { id: body.propertyId } }), organizationId, 'Property');
+    await assertOwned(() => prisma.property.findUnique({ where: { id: body.propertyId } }), organizationId, 'Property', req);
     const channel = await prisma.channel.findUnique({ where: { id: body.channelId } });
     if (!channel) throw badRequest('Unknown channel');
 
     const existing = await prisma.channelConnection.findUnique({
       where: { propertyId_channelId: { propertyId: body.propertyId, channelId: body.channelId } },
     });
-    const willBeEnabled = rest.enabled ?? existing?.enabled ?? false;
-    if (willBeEnabled && !existing?.enabled) {
-      await assertChannelCategoryAllowed(organizationId, channel.category as ChannelCategory);
-      await assertWithinLimit(organizationId, 'channelConnections');
-    }
 
     const conn = await prisma.channelConnection.upsert({
       where: { propertyId_channelId: { propertyId: body.propertyId, channelId: body.channelId } },
@@ -171,15 +170,9 @@ channelsRouter.patch(
   requireRole('manager'),
   asyncHandler(async (req, res) => {
     const organizationId = req.user!.organizationId!;
-    const existing = await assertConnectionOwned(req.params.id, organizationId);
+    const existing = await assertConnectionOwned(req.params.id, organizationId, req);
     const body = parse(connectionInput.partial().omit({ propertyId: true, channelId: true }), req.body);
     const { credentials, ...rest } = body;
-
-    if (rest.enabled && !existing.enabled) {
-      const channel = await prisma.channel.findUniqueOrThrow({ where: { id: existing.channelId } });
-      await assertChannelCategoryAllowed(organizationId, channel.category as ChannelCategory);
-      await assertWithinLimit(organizationId, 'channelConnections');
-    }
 
     // Merge credential patches onto the existing blob so partial updates keep secrets.
     let credentialsBlob: string | undefined;
@@ -201,7 +194,7 @@ channelsRouter.delete(
   '/connections/:id',
   requireRole('admin'),
   asyncHandler(async (req, res) => {
-    await assertConnectionOwned(req.params.id, req.user!.organizationId!);
+    await assertConnectionOwned(req.params.id, req.user!.organizationId!, req);
     await prisma.channelConnection.delete({ where: { id: req.params.id } });
     res.status(204).end();
   }),
@@ -211,7 +204,7 @@ channelsRouter.post(
   '/connections/:id/webhook-secret/rotate',
   requireRole('manager'),
   asyncHandler(async (req, res) => {
-    await assertConnectionOwned(req.params.id, req.user!.organizationId!);
+    await assertConnectionOwned(req.params.id, req.user!.organizationId!, req);
     const conn = await prisma.channelConnection.update({
       where: { id: req.params.id },
       data: { webhookSecret: generateSecret() },
@@ -225,7 +218,7 @@ channelsRouter.post(
   '/connections/:id/test',
   requireRole('manager'),
   asyncHandler(async (req, res) => {
-    await assertConnectionOwned(req.params.id, req.user!.organizationId!);
+    await assertConnectionOwned(req.params.id, req.user!.organizationId!, req);
     const { connector, ctx, driver } = await resolveConnection(req.params.id);
     try {
       const result = await connector.testConnection(ctx);
@@ -262,13 +255,15 @@ const mappingInput = z.object({
 async function assertMappingInputOwned(
   body: { channelConnectionId: string; roomTypeId: string },
   organizationId: string,
+  req: import('express').Request,
 ) {
-  await assertConnectionOwned(body.channelConnectionId, organizationId);
+  await assertConnectionOwned(body.channelConnectionId, organizationId, req);
   const room = await prisma.roomType.findUnique({
     where: { id: body.roomTypeId },
     include: { property: { select: { organizationId: true } } },
   });
   if (!room || room.property.organizationId !== organizationId) throw notFound('Room type not found');
+  assertPropertyInScope(room.propertyId, req);
 }
 
 channelsRouter.post(
@@ -276,7 +271,7 @@ channelsRouter.post(
   requireRole('manager'),
   asyncHandler(async (req, res) => {
     const body = parse(mappingInput, req.body);
-    await assertMappingInputOwned(body, req.user!.organizationId!);
+    await assertMappingInputOwned(body, req.user!.organizationId!, req);
     const mapping = await prisma.roomMapping.upsert({
       where: {
         channelConnectionId_externalRoomId_externalRatePlanId: {
@@ -300,9 +295,10 @@ channelsRouter.patch(
     const organizationId = req.user!.organizationId!;
     const existing = await prisma.roomMapping.findUnique({
       where: { id: req.params.id },
-      include: { channelConnection: { select: { organizationId: true } } },
+      include: { channelConnection: { select: { organizationId: true, propertyId: true } } },
     });
     if (!existing || existing.channelConnection.organizationId !== organizationId) throw notFound('Mapping not found');
+    assertPropertyInScope(existing.channelConnection.propertyId, req);
     const body = parse(mappingInput.partial().omit({ channelConnectionId: true }), req.body);
     const mapping = await prisma.roomMapping.update({
       where: { id: req.params.id },
@@ -320,9 +316,10 @@ channelsRouter.delete(
     const organizationId = req.user!.organizationId!;
     const existing = await prisma.roomMapping.findUnique({
       where: { id: req.params.id },
-      include: { channelConnection: { select: { organizationId: true } } },
+      include: { channelConnection: { select: { organizationId: true, propertyId: true } } },
     });
     if (!existing || existing.channelConnection.organizationId !== organizationId) throw notFound('Mapping not found');
+    assertPropertyInScope(existing.channelConnection.propertyId, req);
     await prisma.roomMapping.delete({ where: { id: req.params.id } });
     res.status(204).end();
   }),
@@ -333,7 +330,7 @@ channelsRouter.get(
   asyncHandler(async (req, res) => {
     const connectionId = req.query.connectionId ? String(req.query.connectionId) : undefined;
     if (!connectionId) throw badRequest('connectionId is required');
-    await assertConnectionOwned(connectionId, req.user!.organizationId!);
+    await assertConnectionOwned(connectionId, req.user!.organizationId!, req);
     const mappings = await prisma.roomMapping.findMany({
       where: { channelConnectionId: connectionId },
       include: { roomType: true, ratePlan: true },

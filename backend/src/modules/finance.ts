@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { todayIso } from '@cm/shared';
 import { prisma } from '../db';
 import { asyncHandler, parse } from '../lib/http';
-import { requireOrg, assertOwned } from '../lib/tenant';
+import { assertOwned, requireOrg, resolvePropertyFilter } from '../lib/tenant';
 import { requirePermission } from '../lib/permissions';
 
 export const financeRouter = Router();
@@ -18,7 +18,7 @@ financeRouter.get(
   '/overview',
   asyncHandler(async (req, res) => {
     const organizationId = req.user!.organizationId!;
-    const propertyId = req.query.propertyId ? String(req.query.propertyId) : undefined;
+    const propertyId = resolvePropertyFilter(req, req.query.propertyId ? String(req.query.propertyId) : undefined);
     const from = String(req.query.from ?? todayIso().slice(0, 8) + '01');
     const to = String(req.query.to ?? todayIso());
 
@@ -79,6 +79,7 @@ financeRouter.get(
         organizationId,
         status: { in: ['captured', 'partially_refunded', 'refunded'] },
         createdAt: { gte: new Date(from + 'T00:00:00Z'), lte: new Date(to + 'T23:59:59Z') },
+        ...(propertyId ? { booking: { propertyId } } : {}),
       },
       _sum: { amountCents: true, commissionCents: true, netCents: true, refundedCents: true },
     });
@@ -124,7 +125,7 @@ financeRouter.post(
   asyncHandler(async (req, res) => {
     const organizationId = req.user!.organizationId!;
     const body = parse(expenseInput, req.body);
-    await assertOwned(() => prisma.property.findUnique({ where: { id: body.propertyId } }), organizationId, 'Property');
+    await assertOwned(() => prisma.property.findUnique({ where: { id: body.propertyId } }), organizationId, 'Property', req);
     const expense = await prisma.expense.create({
       data: { ...body, organizationId, incurredAt: new Date(body.incurredAt + 'T00:00:00Z') },
     });
@@ -137,7 +138,7 @@ financeRouter.patch(
   requirePermission('finance.manage'),
   asyncHandler(async (req, res) => {
     const organizationId = req.user!.organizationId!;
-    await assertOwned(() => prisma.expense.findUnique({ where: { id: req.params.id } }), organizationId, 'Expense');
+    await assertOwned(() => prisma.expense.findUnique({ where: { id: req.params.id } }), organizationId, 'Expense', req);
     const body = parse(expenseInput.partial().omit({ propertyId: true }), req.body);
     const data = { ...body, incurredAt: body.incurredAt ? new Date(body.incurredAt + 'T00:00:00Z') : undefined };
     const expense = await prisma.expense.update({ where: { id: req.params.id }, data });
@@ -150,7 +151,7 @@ financeRouter.delete(
   requirePermission('finance.manage'),
   asyncHandler(async (req, res) => {
     const organizationId = req.user!.organizationId!;
-    await assertOwned(() => prisma.expense.findUnique({ where: { id: req.params.id } }), organizationId, 'Expense');
+    await assertOwned(() => prisma.expense.findUnique({ where: { id: req.params.id } }), organizationId, 'Expense', req);
     await prisma.expense.delete({ where: { id: req.params.id } });
     res.status(204).end();
   }),

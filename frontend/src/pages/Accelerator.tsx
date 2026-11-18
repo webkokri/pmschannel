@@ -1,16 +1,13 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '@/api/client';
 import { Badge, ErrorNote, PageHeader, Spinner, StatCard } from '@/components/ui';
-import { money, date } from '@/lib/format';
+import { date } from '@/lib/format';
 
 interface AcceleratorStatus {
   active: boolean;
   activatedAt: string | null;
   boostedChannelCodes: string[];
   connectedCount: number;
-  priceCents: number;
-  currency: string;
-  stripeConfigured: boolean;
   bundle: { code: string; name: string; category: string }[];
 }
 
@@ -22,18 +19,15 @@ export function AcceleratorPage() {
   });
 
   const activate = useMutation({
-    mutationFn: () => api<{ applied: boolean; checkoutUrl?: string; message: string }>('/accelerator/activate', { method: 'POST' }),
-    onSuccess: (r) => {
-      if (r.checkoutUrl) window.location.href = r.checkoutUrl;
-      qc.invalidateQueries({ queryKey: ['accelerator'] });
-    },
+    mutationFn: () => api<{ applied: boolean }>('/accelerator/activate', { method: 'POST' }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['accelerator'] }),
   });
 
   return (
     <div>
       <PageHeader
         title="Accelerator"
-        subtitle="One-time purchase that instantly connects your properties to a bundle of extra distribution channels"
+        subtitle="One click to instantly connect every active property to a bundle of extra distribution channels"
       />
 
       {isLoading && <Spinner />}
@@ -41,9 +35,8 @@ export function AcceleratorPage() {
 
       {data && (
         <>
-          <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+          <div className="grid grid-cols-2 gap-3 lg:grid-cols-3">
             <StatCard label="Status" value={<Badge status={data.active ? 'active' : 'not_started'}>{data.active ? 'Active' : 'Inactive'}</Badge>} />
-            <StatCard label="Price" value={money(data.priceCents / 100, data.currency)} sub="one-time" />
             <StatCard label="Channels in bundle" value={String(data.bundle.length)} />
             <StatCard label="Live connections" value={String(data.connectedCount)} />
           </div>
@@ -69,18 +62,12 @@ export function AcceleratorPage() {
             <div className="card mt-6 p-4">
               <h3 className="mb-1 text-sm font-semibold">Activate the Accelerator</h3>
               <p className="text-sm text-slate-500">
-                We'll connect every active property to all {data.bundle.length} bundle channels above — no per-channel setup needed.
-                Accelerator connections don't count against your plan's channel limit.
+                We'll connect every active property to all {data.bundle.length} bundle channels above — no per-channel
+                setup needed, and no charge (this is an in-house feature, not a purchase).
               </p>
               <button className="btn-primary mt-3" disabled={activate.isPending} onClick={() => activate.mutate()}>
-                Activate for {money(data.priceCents / 100, data.currency)}
+                Activate
               </button>
-              {!data.stripeConfigured && (
-                <p className="mt-2 text-xs text-amber-500">
-                  Payments aren't configured on this server yet — activating will record your request for the team to action manually.
-                </p>
-              )}
-              {activate.data?.message && <p className="mt-2 text-xs text-slate-500">{activate.data.message}</p>}
             </div>
           )}
         </>

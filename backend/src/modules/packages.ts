@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { prisma } from '../db';
 import { asyncHandler, parse } from '../lib/http';
-import { requireOrg, assertOwned } from '../lib/tenant';
+import { assertOwned, requireOrg, resolvePropertyFilter } from '../lib/tenant';
 import { requireRole } from '../auth';
 
 export const packagesRouter = Router();
@@ -12,7 +12,7 @@ packagesRouter.get(
   '/',
   asyncHandler(async (req, res) => {
     const organizationId = req.user!.organizationId!;
-    const propertyId = req.query.propertyId ? String(req.query.propertyId) : undefined;
+    const propertyId = resolvePropertyFilter(req, req.query.propertyId ? String(req.query.propertyId) : undefined);
     const packages = await prisma.package.findMany({
       where: { organizationId, propertyId },
       orderBy: { createdAt: 'desc' },
@@ -39,7 +39,7 @@ packagesRouter.post(
   asyncHandler(async (req, res) => {
     const organizationId = req.user!.organizationId!;
     const body = parse(packageInput, req.body);
-    await assertOwned(() => prisma.property.findUnique({ where: { id: body.propertyId } }), organizationId, 'Property');
+    await assertOwned(() => prisma.property.findUnique({ where: { id: body.propertyId } }), organizationId, 'Property', req);
     const pkg = await prisma.package.create({ data: { ...body, organizationId } });
     res.status(201).json({ package: pkg });
   }),
@@ -50,7 +50,7 @@ packagesRouter.patch(
   requireRole('manager'),
   asyncHandler(async (req, res) => {
     const organizationId = req.user!.organizationId!;
-    await assertOwned(() => prisma.package.findUnique({ where: { id: req.params.id } }), organizationId, 'Package');
+    await assertOwned(() => prisma.package.findUnique({ where: { id: req.params.id } }), organizationId, 'Package', req);
     const body = parse(packageInput.partial().omit({ propertyId: true }), req.body);
     const pkg = await prisma.package.update({ where: { id: req.params.id }, data: body });
     res.json({ package: pkg });
@@ -62,7 +62,7 @@ packagesRouter.delete(
   requireRole('manager'),
   asyncHandler(async (req, res) => {
     const organizationId = req.user!.organizationId!;
-    await assertOwned(() => prisma.package.findUnique({ where: { id: req.params.id } }), organizationId, 'Package');
+    await assertOwned(() => prisma.package.findUnique({ where: { id: req.params.id } }), organizationId, 'Package', req);
     await prisma.package.delete({ where: { id: req.params.id } });
     res.status(204).end();
   }),

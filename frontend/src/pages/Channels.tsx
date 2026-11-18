@@ -3,7 +3,7 @@ import { Link, useSearchParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '@/api/client';
 import { useProperty } from '@/lib/property';
-import { Badge, ErrorNote, LimitBanner, PageHeader, Spinner } from '@/components/ui';
+import { Badge, ErrorNote, PageHeader, Spinner } from '@/components/ui';
 import { timeAgo } from '@/lib/format';
 
 interface Channel {
@@ -128,7 +128,7 @@ export function ChannelsPage() {
         ))}
       </div>
 
-      {(connect.error || toggle.error) && <div className="mb-3"><LimitBanner error={connect.error ?? toggle.error} /></div>}
+      {(connect.error || toggle.error) && <div className="mb-3"><ErrorNote error={connect.error ?? toggle.error} /></div>}
 
       {test.data && (
         <div

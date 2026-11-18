@@ -2,12 +2,10 @@ import { Router, type NextFunction, type Request, type Response } from 'express'
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { z } from 'zod';
-import { DEFAULT_TRIAL_DAYS, DEFAULT_TRIAL_PLAN_CODE, type UserRole } from '@cm/shared';
+import { type UserRole } from '@cm/shared';
 import { prisma } from '../db';
 import { env } from '../env';
-import { asyncHandler, badRequest, forbidden, parse, unauthorized } from '../lib/http';
-import { assignSupportManager } from '../lib/support';
-import { getPlatformSetting } from '../lib/platform-settings';
+import { asyncHandler, forbidden, parse, unauthorized } from '../lib/http';
 
 export interface AuthUser {
   id: string;
@@ -16,6 +14,9 @@ export interface AuthUser {
   role: UserRole;
   organizationId: string | null;
   isSuperAdmin: boolean;
+  /** Hard-restricts a dedicated property manager/owner to this one property — null for
+   *  portfolio-wide staff. See lib/tenant.ts. */
+  assignedPropertyId: string | null;
   /** Granular permission overlay — see lib/permissions.ts. */
   permissions: string[];
   /** Set on a short-lived token issued by super-admin impersonation, never on a real login. */
@@ -75,6 +76,7 @@ export const authRequired = asyncHandler(async (req: Request, _res: Response, ne
     role: user.role,
     organizationId: user.organizationId,
     isSuperAdmin: user.isSuperAdmin,
+    assignedPropertyId: user.assignedPropertyId,
     permissions: user.permissions,
     impersonated: Boolean(payload.impersonated),
   };
@@ -112,6 +114,7 @@ export async function verifyLogin(email: string, password: string): Promise<Auth
     role: user.role,
     organizationId: user.organizationId,
     isSuperAdmin: user.isSuperAdmin,
+    assignedPropertyId: user.assignedPropertyId,
     permissions: user.permissions,
   };
 }
@@ -136,97 +139,6 @@ authRouter.get(
   }),
 );
 
-const signupInput = z.object({
-  organizationName: z.string().min(2).max(120),
-  name: z.string().min(1).max(120),
-  email: z.string().email(),
-  password: z.string().min(8).max(200),
-  country: z.enum(['US', 'CA']).default('US'),
-  planCode: z.string().optional(),
-});
-
-function slugify(name: string): string {
-  return (
-    name
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, '-')
-      .replace(/^-+|-+$/g, '')
-      .slice(0, 60) || 'org'
-  );
-}
-
-/** Self-serve signup: creates an Organization + trial Subscription + the first admin User. */
-authRouter.post(
-  '/signup',
-  asyncHandler(async (req, res) => {
-    // Checked server-side regardless of whether the frontend hid the signup link —
-    // a disabled toggle must actually block account creation, not just the UI path to it.
-    const signupEnabled = await getPlatformSetting<boolean>('signupEnabled');
-    if (signupEnabled === false) {
-      throw forbidden('New signups are currently closed. Contact us if you were invited to join.');
-    }
-
-    const body = parse(signupInput, req.body);
-
-    const existing = await prisma.user.findUnique({ where: { email: body.email.toLowerCase() } });
-    if (existing) throw badRequest('An account with that email already exists');
-
-    const plan = await prisma.plan.findUnique({
-      where: { code: body.planCode ?? DEFAULT_TRIAL_PLAN_CODE },
-    });
-    if (!plan || !plan.active) throw badRequest('Selected plan is not available');
-
-    const baseSlug = slugify(body.organizationName);
-    let slug = baseSlug;
-    for (let i = 1; await prisma.organization.findUnique({ where: { slug } }); i++) {
-      slug = `${baseSlug}-${i}`;
-    }
-
-    const trialEndsAt = new Date(Date.now() + DEFAULT_TRIAL_DAYS * 86_400_000);
-
-    const { organization, user } = await prisma.$transaction(async (tx) => {
-      const organization = await tx.organization.create({
-        data: {
-          name: body.organizationName,
-          slug,
-          contactEmail: body.email.toLowerCase(),
-          country: body.country,
-          currency: body.country === 'CA' ? 'CAD' : 'USD',
-          status: 'trialing',
-          trialEndsAt,
-        },
-      });
-      await tx.subscription.create({
-        data: {
-          organizationId: organization.id,
-          planId: plan.id,
-          status: 'trialing',
-          currentPeriodEnd: trialEndsAt,
-        },
-      });
-      const user = await tx.user.create({
-        data: {
-          organizationId: organization.id,
-          email: body.email.toLowerCase(),
-          name: body.name,
-          role: 'admin',
-          passwordHash: await bcrypt.hash(body.password, 10),
-        },
-      });
-      return { organization, user };
-    });
-
-    const supportManager = await assignSupportManager(organization.id);
-
-    const authUser: AuthUser = {
-      id: user.id,
-      email: user.email,
-      name: user.name,
-      role: user.role,
-      organizationId: organization.id,
-      isSuperAdmin: false,
-      permissions: [],
-    };
-    res.status(201).json({ token: signToken(authUser), user: authUser, organization, supportManager });
-  }),
-);
+// No self-serve signup: this is a single, internally-owned portfolio. The super admin
+// creates every property and every property manager/owner account directly — see
+// modules/admin/properties.ts.

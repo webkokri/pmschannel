@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { prisma } from '../db';
 import { asyncHandler, notFound, parse } from '../lib/http';
 import { requireRole } from '../auth';
-import { requireOrg, assertOwned } from '../lib/tenant';
+import { assertOwned, propertyScope, requireOrg, resolvePropertyFilter } from '../lib/tenant';
 import { sweepConflicts } from '../engine/conflict';
 
 export const conflictsRouter = Router();
@@ -15,11 +15,15 @@ conflictsRouter.get(
     const organizationId = req.user!.organizationId!;
     const status = req.query.status ? String(req.query.status) : undefined;
     const type = req.query.type ? String(req.query.type) : undefined;
+    const scope = propertyScope(req);
     const conflicts = await prisma.conflictAlert.findMany({
       where: {
         organizationId,
         status: status as never,
         type: type ?? undefined,
+        // A scoped manager only sees conflicts attributable to their property — one
+        // with no roomType (can't be attributed) is excluded rather than shown.
+        ...(scope ? { roomType: { propertyId: scope } } : {}),
       },
       orderBy: [{ status: 'asc' }, { createdAt: 'desc' }],
       include: { roomType: { select: { name: true, property: { select: { name: true } } } } },
@@ -59,7 +63,13 @@ conflictsRouter.patch(
   '/:id',
   requireRole('manager'),
   asyncHandler(async (req, res) => {
-    await assertOwned(() => prisma.conflictAlert.findUnique({ where: { id: req.params.id } }), req.user!.organizationId!, 'Conflict');
+    const existing = await prisma.conflictAlert.findUnique({
+      where: { id: req.params.id },
+      include: { roomType: { select: { propertyId: true } } },
+    });
+    if (!existing || existing.organizationId !== req.user!.organizationId) throw notFound('Conflict not found');
+    const scope = propertyScope(req);
+    if (scope && existing.roomType?.propertyId !== scope) throw notFound('Conflict not found');
     const body = parse(resolveInput, req.body);
     const conflict = await prisma.conflictAlert.update({
       where: { id: req.params.id },
@@ -79,9 +89,9 @@ conflictsRouter.post(
   requireRole('manager'),
   asyncHandler(async (req, res) => {
     const organizationId = req.user!.organizationId!;
-    const propertyId = req.body?.propertyId ? String(req.body.propertyId) : undefined;
+    const propertyId = resolvePropertyFilter(req, req.body?.propertyId ? String(req.body.propertyId) : undefined);
     if (propertyId) {
-      await assertOwned(() => prisma.property.findUnique({ where: { id: propertyId } }), organizationId, 'Property');
+      await assertOwned(() => prisma.property.findUnique({ where: { id: propertyId } }), organizationId, 'Property', req);
     }
     const result = await sweepConflicts(organizationId, propertyId);
     res.json(result);

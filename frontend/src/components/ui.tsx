@@ -1,7 +1,5 @@
 import { useState, type ReactNode } from 'react';
-import { Link } from 'react-router-dom';
 import { statusBadge } from '@/lib/format';
-import { ApiError } from '@/api/client';
 
 export function CopyButton({ text }: { text: string }) {
   const [copied, setCopied] = useState(false);
@@ -135,24 +133,10 @@ export function Drawer({
 }
 
 export function ErrorNote({ error }: { error: unknown }) {
-  if (error instanceof ApiError && error.status === 402) return <LimitBanner error={error} />;
   const msg = error instanceof Error ? error.message : String(error);
   return (
     <div className="rounded-lg border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700 dark:border-rose-500/30 dark:bg-rose-500/10 dark:text-rose-300">
       {msg}
-    </div>
-  );
-}
-
-/** Shown when an action is blocked by a plan limit (API returns 402). */
-export function LimitBanner({ error }: { error: unknown }) {
-  if (!(error instanceof ApiError) || error.status !== 402) return null;
-  return (
-    <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-300">
-      <span>{error.message}</span>
-      <Link to="/billing" className="btn-primary !py-1">
-        View plans
-      </Link>
     </div>
   );
 }

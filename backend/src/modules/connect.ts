@@ -1,13 +1,13 @@
 import { Router } from 'express';
-import { requireOrg } from '../lib/tenant';
+import { requireOrg, requirePortfolioStaff } from '../lib/tenant';
 import { requireRole } from '../auth';
 import { asyncHandler } from '../lib/http';
 import { connectConfigured, refreshConnectStatus, startConnectOnboarding } from '../lib/connect';
 import { prisma } from '../db';
 
-/** Stripe Connect payout account — org-scoped. */
+/** Stripe Connect payout account — portfolio-wide, not property-scoped. */
 export const connectRouter = Router();
-connectRouter.use(requireOrg);
+connectRouter.use(requireOrg, requirePortfolioStaff);
 
 connectRouter.get(
   '/status',

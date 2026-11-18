@@ -4,7 +4,7 @@ import { addDays, nightsBetween, todayIso, type NormalizedBooking } from '@cm/sh
 import { prisma } from '../db';
 import { asyncHandler, badRequest, parse } from '../lib/http';
 import { requireRole } from '../auth';
-import { requireOrg } from '../lib/tenant';
+import { propertyScope, requireOrg } from '../lib/tenant';
 import { getOrgSetting, setOrgSetting } from '../lib/settings';
 import { MockConnector } from '../connectors/mock/mock-connector';
 import { resolveConnection } from '../connectors/registry';
@@ -19,8 +19,9 @@ simulatorRouter.get(
   '/targets',
   asyncHandler(async (req, res) => {
     const organizationId = req.user!.organizationId!;
+    const scope = propertyScope(req);
     const connections = await prisma.channelConnection.findMany({
-      where: { organizationId, enabled: true, roomMappings: { some: { active: true } } },
+      where: { organizationId, enabled: true, roomMappings: { some: { active: true } }, ...(scope ? { propertyId: scope } : {}) },
       include: {
         channel: { select: { name: true, code: true, kind: true } },
         property: { select: { name: true, code: true } },
@@ -48,9 +49,10 @@ simulatorRouter.post(
   requireRole('manager'),
   asyncHandler(async (req, res) => {
     const organizationId = req.user!.organizationId!;
+    const scope = propertyScope(req);
     const body = parse(generateInput, req.body);
     const conns = await prisma.channelConnection.findMany({
-      where: { id: { in: body.connectionIds }, organizationId },
+      where: { id: { in: body.connectionIds }, organizationId, ...(scope ? { propertyId: scope } : {}) },
       include: { channel: true },
     });
     if (conns.length === 0) throw badRequest('No matching connections');
@@ -97,13 +99,15 @@ simulatorRouter.post(
   requireRole('manager'),
   asyncHandler(async (req, res) => {
     const organizationId = req.user!.organizationId!;
+    const scope = propertyScope(req);
     const body = parse(overbookInput, req.body);
+    if (scope && body.propertyId && body.propertyId !== scope) throw badRequest('No room type with active channel mappings found');
 
     const roomType = body.roomTypeId
-      ? await prisma.roomType.findFirst({ where: { id: body.roomTypeId, property: { organizationId } } })
+      ? await prisma.roomType.findFirst({ where: { id: body.roomTypeId, property: { organizationId, id: scope ?? undefined } } })
       : await prisma.roomType.findFirst({
           where: {
-            property: { organizationId, id: body.propertyId },
+            property: { organizationId, id: scope ?? body.propertyId },
             roomMappings: { some: { active: true, channelConnection: { enabled: true } } },
           },
           orderBy: { totalUnits: 'asc' },

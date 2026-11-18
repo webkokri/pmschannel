@@ -5,7 +5,6 @@ import { createApp } from '../src/app';
 import { prisma } from '../src/db';
 import { getCommissionRateBps } from '../src/lib/commission';
 import { activateAccelerator, getAcceleratorChannelCodes } from '../src/lib/accelerator';
-import { assertWithinLimit } from '../src/lib/limits';
 import { setPlatformSetting } from '../src/lib/platform-settings';
 import { cleanWorld, isoDate, makeWorld } from './helpers';
 
@@ -137,28 +136,10 @@ describe('Accelerator', () => {
     expect(boosted.every((c) => c.enabled)).toBe(true);
   });
 
-  it('accelerator connections never count against (or get blocked by) the plan channel limit', async () => {
-    // Give the org a Starter-tier plan with a channel limit already met by the accelerator
-    // connections alone, then confirm a *new* (non-accelerator) connection attempt is still
-    // correctly evaluated against just the real usage, not inflated by the accelerator ones.
-    const restrictivePlan = await prisma.plan.upsert({
-      where: { code: 'commission-test-restrictive' },
-      update: {},
-      create: {
-        code: 'commission-test-restrictive',
-        name: 'Restrictive',
-        limits: { maxProperties: 1, maxRoomTypesPerProperty: 1, maxChannelConnections: 1, maxUsers: 1, channelCategories: [] },
-      },
-    });
-    await prisma.subscription.update({ where: { organizationId: world.organization.id }, data: { planId: restrictivePlan.id } });
-
-    // The 2 non-accelerator connections from makeWorld (booking_com, airbnb) already exceed
-    // maxChannelConnections=1, so a real new connection should be blocked...
-    await expect(assertWithinLimit(world.organization.id, 'channelConnections')).rejects.toThrow();
-
-    // ...but that block is driven by the 2 real connections, not by however many accelerator
-    // ones exist (already several from the previous test) — i.e. accelerator rows are
-    // excluded from the count entirely, confirmed by checking the count directly.
+  it('accelerator connections are flagged distinctly from real (non-accelerator) ones', async () => {
+    // The 2 real connections from makeWorld (booking_com, airbnb) stay viaAccelerator=false,
+    // distinct from however many the Accelerator bundle added in the previous test — there's
+    // no plan/limit concept left to interact with, but the flag itself must still be accurate.
     const nonAcceleratorCount = await prisma.channelConnection.count({
       where: { organizationId: world.organization.id, enabled: true, viaAccelerator: false },
     });

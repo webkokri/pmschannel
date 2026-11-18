@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { prisma } from '../db';
 import { asyncHandler, notFound } from '../lib/http';
 import { requireRole } from '../auth';
-import { requireOrg } from '../lib/tenant';
+import { propertyScope, requireOrg, requirePortfolioStaff } from '../lib/tenant';
 import { pollPullChannels, runDueJobs } from '../worker/job-runner';
 
 export const syncRouter = Router();
@@ -12,9 +12,14 @@ syncRouter.get(
   '/jobs',
   asyncHandler(async (req, res) => {
     const organizationId = req.user!.organizationId!;
+    const scope = propertyScope(req);
     const status = req.query.status ? String(req.query.status).split(',') : undefined;
     const jobs = await prisma.syncJob.findMany({
-      where: { organizationId, status: status ? { in: status as never[] } : undefined },
+      where: {
+        organizationId,
+        status: status ? { in: status as never[] } : undefined,
+        ...(scope ? { channelConnection: { propertyId: scope } } : {}),
+      },
       orderBy: { updatedAt: 'desc' },
       take: 200,
       include: {
@@ -34,8 +39,9 @@ syncRouter.get(
     const q = req.query;
     const page = Math.max(1, Number(q.page ?? 1));
     const pageSize = Math.min(200, Math.max(1, Number(q.pageSize ?? 50)));
+    const scope = propertyScope(req);
     const where = {
-      channelConnection: { organizationId },
+      channelConnection: { organizationId, ...(scope ? { propertyId: scope } : {}) },
       ok: q.ok === undefined ? undefined : q.ok === 'true',
       direction: q.direction ? String(q.direction) : undefined,
       entityType: q.entityType ? String(q.entityType) : undefined,
@@ -64,8 +70,13 @@ syncRouter.post(
   requireRole('manager'),
   asyncHandler(async (req, res) => {
     const organizationId = req.user!.organizationId!;
-    const job = await prisma.syncJob.findUnique({ where: { id: req.params.id } });
+    const job = await prisma.syncJob.findUnique({
+      where: { id: req.params.id },
+      include: { channelConnection: { select: { propertyId: true } } },
+    });
     if (!job || job.organizationId !== organizationId) throw notFound('Job not found');
+    const scope = propertyScope(req);
+    if (scope && job.channelConnection.propertyId !== scope) throw notFound('Job not found');
     await prisma.syncJob.update({
       where: { id: job.id },
       data: { status: 'pending', nextRunAt: new Date(), attempts: 0, lastError: null },
@@ -75,10 +86,15 @@ syncRouter.post(
   }),
 );
 
-/** Manually kick the worker loop for this organization only (handy in dev / demos). */
+/**
+ * Manually kick the worker loop for this organization only (handy in dev / demos) — runs
+ * every due job across the whole portfolio, so it's portfolio-staff only rather than
+ * trying to filter a shared background run by one property.
+ */
 syncRouter.post(
   '/run',
   requireRole('manager'),
+  requirePortfolioStaff,
   asyncHandler(async (req, res) => {
     const organizationId = req.user!.organizationId!;
     const jobs = await runDueJobs(100, organizationId);
@@ -91,12 +107,14 @@ syncRouter.get(
   '/health',
   asyncHandler(async (req, res) => {
     const organizationId = req.user!.organizationId!;
+    const scope = propertyScope(req);
+    const connFilter = scope ? { channelConnection: { organizationId, propertyId: scope } } : { channelConnection: { organizationId } };
     const [pending, failed, dead, succeeded24h, failed24h] = await Promise.all([
-      prisma.syncJob.count({ where: { organizationId, status: 'pending' } }),
-      prisma.syncJob.count({ where: { organizationId, status: 'failed' } }),
-      prisma.syncJob.count({ where: { organizationId, status: 'dead' } }),
-      prisma.syncLog.count({ where: { channelConnection: { organizationId }, ok: true, createdAt: { gte: since(24) } } }),
-      prisma.syncLog.count({ where: { channelConnection: { organizationId }, ok: false, createdAt: { gte: since(24) } } }),
+      prisma.syncJob.count({ where: { organizationId, status: 'pending', ...(scope ? { channelConnection: { propertyId: scope } } : {}) } }),
+      prisma.syncJob.count({ where: { organizationId, status: 'failed', ...(scope ? { channelConnection: { propertyId: scope } } : {}) } }),
+      prisma.syncJob.count({ where: { organizationId, status: 'dead', ...(scope ? { channelConnection: { propertyId: scope } } : {}) } }),
+      prisma.syncLog.count({ where: { ...connFilter, ok: true, createdAt: { gte: since(24) } } }),
+      prisma.syncLog.count({ where: { ...connFilter, ok: false, createdAt: { gte: since(24) } } }),
     ]);
     res.json({ pending, failed, dead, succeeded24h, failed24h });
   }),

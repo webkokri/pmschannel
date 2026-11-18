@@ -1,8 +1,8 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { prisma } from '../db';
-import { asyncHandler, badRequest, parse } from '../lib/http';
-import { requireOrg, assertOwned } from '../lib/tenant';
+import { asyncHandler, badRequest, notFound, parse } from '../lib/http';
+import { assertOwned, propertyScope, requireOrg, requirePortfolioStaff } from '../lib/tenant';
 import { requireRole } from '../auth';
 import { getGatewayForPayment, getPaymentGateway } from '../lib/payments';
 import { stripeConfigured } from '../lib/stripe';
@@ -47,6 +47,7 @@ const gatewayConfigInput = z.object({
 paymentsRouter.patch(
   '/gateway-config',
   requireRole('admin'),
+  requirePortfolioStaff,
   asyncHandler(async (req, res) => {
     const organizationId = req.user!.organizationId!;
     const body = parse(gatewayConfigInput, req.body);
@@ -72,8 +73,9 @@ paymentsRouter.get(
   asyncHandler(async (req, res) => {
     const organizationId = req.user!.organizationId!;
     const bookingId = req.query.bookingId ? String(req.query.bookingId) : undefined;
+    const scope = propertyScope(req);
     const payments = await prisma.payment.findMany({
-      where: { organizationId, bookingId },
+      where: { organizationId, bookingId, ...(scope ? { booking: { propertyId: scope } } : {}) },
       orderBy: { createdAt: 'desc' },
       include: { booking: { select: { guestName: true, externalRef: true } } },
     });
@@ -130,6 +132,7 @@ paymentsRouter.post(
       () => prisma.booking.findUnique({ where: { id: body.bookingId } }),
       organizationId,
       'Booking',
+      req,
     );
     const split = await computeCommission(organizationId, body.amountCents);
 
@@ -197,6 +200,11 @@ paymentsRouter.post(
       organizationId,
       'Payment',
     );
+    const scope = propertyScope(req);
+    if (scope) {
+      const booking = await prisma.booking.findUnique({ where: { id: payment.bookingId }, select: { propertyId: true } });
+      if (booking?.propertyId !== scope) throw notFound('Payment not found');
+    }
     if (payment.status !== 'captured' && payment.status !== 'partially_refunded') {
       throw badRequest('Only a captured payment can be refunded');
     }

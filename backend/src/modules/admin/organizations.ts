@@ -1,195 +1,104 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { prisma } from '../../db';
-import { asyncHandler, badRequest, notFound, parse } from '../../lib/http';
+import { asyncHandler, notFound, parse } from '../../lib/http';
 import { signToken, type AuthUser } from '../../auth';
-import { getUsageSummary } from '../../lib/limits';
-import { assignSupportManager, reassignSupportManager } from '../../lib/support';
 import { audit } from '../../lib/audit';
 import { activateAccelerator } from '../../lib/accelerator';
 import { getCommissionRateBps } from '../../lib/commission';
+import { getOrCreatePortfolioOrg } from '../../lib/portfolio';
 
-/** Super-admin: full control over every tenant organization. */
+/** Super-admin: the single portfolio's own settings (commission, accelerator, profile). */
 export const adminOrganizationsRouter = Router();
 
 adminOrganizationsRouter.get(
   '/',
-  asyncHandler(async (req, res) => {
-    const q = req.query;
-    const search = q.search ? String(q.search) : undefined;
-    const status = q.status ? String(q.status) : undefined;
-
-    const organizations = await prisma.organization.findMany({
-      where: {
-        status: status as never,
-        OR: search
-          ? [
-              { name: { contains: search, mode: 'insensitive' } },
-              { slug: { contains: search, mode: 'insensitive' } },
-              { contactEmail: { contains: search, mode: 'insensitive' } },
-            ]
-          : undefined,
-      },
-      orderBy: { createdAt: 'desc' },
-      include: {
-        subscription: { include: { plan: true } },
-        supportManager: { select: { id: true, name: true, email: true } },
-        _count: { select: { properties: true, users: true, bookings: true } },
-      },
-    });
-    res.json({ organizations });
-  }),
-);
-
-adminOrganizationsRouter.get(
-  '/:id',
-  asyncHandler(async (req, res) => {
-    const organization = await prisma.organization.findUnique({
-      where: { id: req.params.id },
-      include: {
-        subscription: { include: { plan: true } },
-        supportManager: { select: { id: true, name: true, email: true } },
-        users: { select: { id: true, name: true, email: true, role: true, active: true, createdAt: true } },
-        properties: { select: { id: true, name: true, code: true, country: true, active: true } },
-        invoices: { orderBy: { issuedAt: 'desc' }, take: 20 },
-        accelerator: true,
-      },
-    });
-    if (!organization) throw notFound('Organization not found');
-    const [usage, effectiveCommissionBps, commissionRevenue] = await Promise.all([
-      getUsageSummary(organization.id).catch(() => null),
-      getCommissionRateBps(organization.id),
-      prisma.payment.aggregate({
-        where: { organizationId: organization.id, status: { in: ['captured', 'partially_refunded', 'refunded'] } },
-        _sum: { commissionCents: true, amountCents: true },
-      }),
-    ]);
+  asyncHandler(async (_req, res) => {
+    const organization = await getOrCreatePortfolioOrg();
+    const [propertyCount, userCount, bookingCount, effectiveCommissionBps, commissionRevenue, accelerator] =
+      await Promise.all([
+        prisma.property.count({ where: { organizationId: organization.id } }),
+        prisma.user.count({ where: { organizationId: organization.id } }),
+        prisma.booking.count({ where: { organizationId: organization.id } }),
+        getCommissionRateBps(organization.id),
+        prisma.payment.aggregate({
+          where: { organizationId: organization.id, status: { in: ['captured', 'partially_refunded', 'refunded'] } },
+          _sum: { commissionCents: true, amountCents: true },
+        }),
+        prisma.accelerator.findUnique({ where: { organizationId: organization.id } }),
+      ]);
     res.json({
       organization,
-      usage,
+      usage: { properties: propertyCount, users: userCount, bookings: bookingCount },
       effectiveCommissionBps,
       platformRevenue: {
         commissionCents: commissionRevenue._sum.commissionCents ?? 0,
         grossCents: commissionRevenue._sum.amountCents ?? 0,
       },
+      accelerator,
     });
   }),
 );
 
-const statusInput = z.object({
-  status: z.enum(['trialing', 'active', 'past_due', 'suspended', 'canceled']),
-  suspendedReason: z.string().optional(),
-});
+const activeInput = z.object({ active: z.boolean() });
 
+/** Portfolio-wide on/off switch (e.g. maintenance mode). */
 adminOrganizationsRouter.patch(
-  '/:id/status',
+  '/active',
   asyncHandler(async (req, res) => {
-    const before = await prisma.organization.findUnique({ where: { id: req.params.id }, select: { status: true } });
-    const body = parse(statusInput, req.body);
-    const organization = await prisma.organization.update({
-      where: { id: req.params.id },
-      data: {
-        status: body.status,
-        suspendedAt: body.status === 'suspended' ? new Date() : null,
-        suspendedReason: body.status === 'suspended' ? (body.suspendedReason ?? '') : '',
-      },
-    });
+    const organization = await getOrCreatePortfolioOrg();
+    const body = parse(activeInput, req.body);
+    const updated = await prisma.organization.update({ where: { id: organization.id }, data: { active: body.active } });
     await audit({
       actorId: req.user!.id,
       organizationId: organization.id,
-      action: 'organization.status_changed',
+      action: 'organization.active_changed',
       entity: 'Organization',
       entityId: organization.id,
-      before,
-      after: { status: organization.status },
+      before: { active: organization.active },
+      after: { active: updated.active },
     });
-    res.json({ organization });
-  }),
-);
-
-const planInput = z.object({
-  planCode: z.string(),
-  status: z.enum(['trialing', 'active', 'past_due', 'canceled', 'paused']).optional(),
-  currentPeriodEnd: z.string().datetime().optional(),
-});
-
-/** Super-admin plan override — no payment involved (comp accounts, offline invoicing). */
-adminOrganizationsRouter.patch(
-  '/:id/plan',
-  asyncHandler(async (req, res) => {
-    const body = parse(planInput, req.body);
-    const plan = await prisma.plan.findUnique({ where: { code: body.planCode } });
-    if (!plan) throw badRequest('Unknown plan code');
-    const before = await prisma.subscription.findUnique({
-      where: { organizationId: req.params.id },
-      include: { plan: { select: { code: true } } },
-    });
-
-    const subscription = await prisma.subscription.upsert({
-      where: { organizationId: req.params.id },
-      create: {
-        organizationId: req.params.id,
-        planId: plan.id,
-        status: body.status ?? 'active',
-        currentPeriodEnd: body.currentPeriodEnd ? new Date(body.currentPeriodEnd) : undefined,
-      },
-      update: {
-        planId: plan.id,
-        pendingPlanId: null,
-        status: body.status ?? undefined,
-        currentPeriodEnd: body.currentPeriodEnd ? new Date(body.currentPeriodEnd) : undefined,
-      },
-      include: { plan: true },
-    });
-    await audit({
-      actorId: req.user!.id,
-      organizationId: req.params.id,
-      action: 'organization.plan_overridden',
-      entity: 'Subscription',
-      entityId: subscription.id,
-      before: { planCode: before?.plan.code ?? null },
-      after: { planCode: plan.code },
-    });
-    res.json({ subscription });
+    res.json({ organization: updated });
   }),
 );
 
 const commissionInput = z.object({ commissionRateBps: z.number().int().min(0).max(10_000).nullable() });
 
-/** Super-admin per-org commission override (null clears it back to the platform default). */
+/** Admin-settable commission on every booking payment — 0% to 100%, in-house. */
 adminOrganizationsRouter.patch(
-  '/:id/commission',
+  '/commission',
   asyncHandler(async (req, res) => {
+    const organization = await getOrCreatePortfolioOrg();
     const body = parse(commissionInput, req.body);
-    const before = await prisma.organization.findUnique({ where: { id: req.params.id }, select: { commissionRateBps: true } });
-    const organization = await prisma.organization.update({
-      where: { id: req.params.id },
+    const updated = await prisma.organization.update({
+      where: { id: organization.id },
       data: { commissionRateBps: body.commissionRateBps },
     });
     await audit({
       actorId: req.user!.id,
       organizationId: organization.id,
-      action: 'organization.commission_rate_overridden',
+      action: 'organization.commission_rate_changed',
       entity: 'Organization',
       entityId: organization.id,
-      before,
-      after: { commissionRateBps: organization.commissionRateBps },
+      before: { commissionRateBps: organization.commissionRateBps },
+      after: { commissionRateBps: updated.commissionRateBps },
     });
-    res.json({ organization });
+    res.json({ organization: updated });
   }),
 );
 
-/** Super-admin comp: activate the Accelerator for free (no Stripe charge). */
+/** Activate the Accelerator for the whole portfolio — free, admin-triggered. */
 adminOrganizationsRouter.post(
-  '/:id/accelerator/comp',
+  '/accelerator/comp',
   asyncHandler(async (req, res) => {
-    const result = await activateAccelerator(req.params.id);
+    const organization = await getOrCreatePortfolioOrg();
+    const result = await activateAccelerator(organization.id);
     await audit({
       actorId: req.user!.id,
-      organizationId: req.params.id,
-      action: 'accelerator.comped',
+      organizationId: organization.id,
+      action: 'accelerator.activated',
       entity: 'Accelerator',
-      entityId: req.params.id,
+      entityId: organization.id,
       after: result,
     });
     res.json(result);
@@ -197,105 +106,61 @@ adminOrganizationsRouter.post(
 );
 
 adminOrganizationsRouter.post(
-  '/:id/accelerator/deactivate',
+  '/accelerator/deactivate',
   asyncHandler(async (req, res) => {
+    const organization = await getOrCreatePortfolioOrg();
     const accelerator = await prisma.accelerator.update({
-      where: { organizationId: req.params.id },
+      where: { organizationId: organization.id },
       data: { active: false, deactivatedAt: new Date() },
     });
     await prisma.channelConnection.updateMany({
-      where: { organizationId: req.params.id, viaAccelerator: true },
+      where: { organizationId: organization.id, viaAccelerator: true },
       data: { enabled: false },
     });
     await audit({
       actorId: req.user!.id,
-      organizationId: req.params.id,
+      organizationId: organization.id,
       action: 'accelerator.deactivated',
       entity: 'Accelerator',
-      entityId: req.params.id,
+      entityId: organization.id,
     });
     res.json({ accelerator });
   }),
 );
 
-const reassignInput = z.object({ supportManagerId: z.string().nullable() });
-
-adminOrganizationsRouter.patch(
-  '/:id/support-manager',
-  asyncHandler(async (req, res) => {
-    const body = parse(reassignInput, req.body);
-    await reassignSupportManager(req.params.id, body.supportManagerId);
-    const organization = await prisma.organization.findUniqueOrThrow({
-      where: { id: req.params.id },
-      include: { supportManager: { select: { id: true, name: true, email: true } } },
-    });
-    await audit({
-      actorId: req.user!.id,
-      organizationId: organization.id,
-      action: 'organization.support_manager_reassigned',
-      entity: 'Organization',
-      entityId: organization.id,
-      after: { supportManagerId: body.supportManagerId },
-    });
-    res.json({ organization });
-  }),
-);
-
-/** Re-run auto-assignment (e.g. after a new support manager joins or one left). */
-adminOrganizationsRouter.post(
-  '/:id/support-manager/auto-assign',
-  asyncHandler(async (req, res) => {
-    const manager = await assignSupportManager(req.params.id);
-    res.json({ supportManager: manager });
-  }),
-);
-
 /**
- * Impersonate: issue a short-lived token scoped to this organization, signed in as its
- * first active admin, for support purposes. The token is flagged `impersonated`.
+ * Impersonate: issue a short-lived token signed in as the portfolio's first active
+ * portfolio-wide admin, for support purposes. The token is flagged `impersonated`. To
+ * impersonate a specific property's manager, use POST /api/admin/properties/:id/impersonate.
  */
 adminOrganizationsRouter.post(
-  '/:id/impersonate',
+  '/impersonate',
   asyncHandler(async (req, res) => {
-    const orgAdmin = await prisma.user.findFirst({
-      where: { organizationId: req.params.id, role: 'admin', active: true },
+    const organization = await getOrCreatePortfolioOrg();
+    const admin = await prisma.user.findFirst({
+      where: { organizationId: organization.id, role: 'admin', assignedPropertyId: null, active: true },
       orderBy: { createdAt: 'asc' },
     });
-    if (!orgAdmin) throw notFound('This organization has no active admin user to impersonate');
+    if (!admin) throw notFound('No active portfolio-wide admin user to impersonate');
 
     const authUser: AuthUser = {
-      id: orgAdmin.id,
-      email: orgAdmin.email,
-      name: orgAdmin.name,
-      role: orgAdmin.role,
-      organizationId: orgAdmin.organizationId,
+      id: admin.id,
+      email: admin.email,
+      name: admin.name,
+      role: admin.role,
+      organizationId: admin.organizationId,
       isSuperAdmin: false,
-      permissions: orgAdmin.permissions,
+      assignedPropertyId: null,
+      permissions: admin.permissions,
       impersonated: true,
     };
     await audit({
       actorId: req.user!.id,
-      organizationId: req.params.id,
+      organizationId: organization.id,
       action: 'organization.impersonated',
       entity: 'User',
-      entityId: orgAdmin.id,
+      entityId: admin.id,
     });
     res.json({ token: signToken(authUser, { expiresIn: '30m' }), user: authUser });
-  }),
-);
-
-adminOrganizationsRouter.delete(
-  '/:id',
-  asyncHandler(async (req, res) => {
-    const organization = await prisma.organization.findUnique({ where: { id: req.params.id }, select: { name: true } });
-    await prisma.organization.delete({ where: { id: req.params.id } });
-    await audit({
-      actorId: req.user!.id,
-      action: 'organization.deleted',
-      entity: 'Organization',
-      entityId: req.params.id,
-      before: organization,
-    });
-    res.status(204).end();
   }),
 );

@@ -124,26 +124,3 @@ export type SyncEntity =
   | 'booking_ack';
 
 export type UserRole = 'admin' | 'manager' | 'viewer';
-
-// ── SaaS: organizations, plans, subscriptions ──────────────────────────────
-
-export type OrganizationStatus = 'trialing' | 'active' | 'past_due' | 'suspended' | 'canceled';
-
-export type SubscriptionStatus = 'trialing' | 'active' | 'past_due' | 'canceled' | 'paused';
-
-export type BillingCycle = 'monthly' | 'yearly';
-
-export type InvoiceStatus = 'draft' | 'open' | 'paid' | 'void' | 'uncollectible';
-
-/** Limits carried on `Plan.limits` (JSON) — the primary axis is property count. */
-export interface PlanLimits {
-  maxProperties: number;
-  maxRoomTypesPerProperty: number;
-  maxChannelConnections: number;
-  maxUsers: number;
-  /** Which OTA catalogue categories this plan may connect. */
-  channelCategories: ChannelCategory[];
-}
-
-/** Resource keys `assertWithinLimit` can check against a plan's limits. */
-export type LimitKey = 'properties' | 'roomTypesPerProperty' | 'channelConnections' | 'users';

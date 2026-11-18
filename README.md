@@ -1,12 +1,13 @@
 # Channel Manager
 
-A **multi-tenant SaaS hospitality platform** for lodging operators in **Canada and the
-USA** — a channel manager at its core (ingests bookings from every connected OTA,
-prevents double-bookings, pushes availability/rates/restrictions back out to every other
-channel), plus the property-management, revenue-management, finance, staff and guest
--facing modules a real operation needs around it. Hotel/property owners sign up, subscribe
-to a plan, and get their own isolated workspace. A platform **super admin** has full
-control over every tenant, every subscription plan, and the global OTA catalogue.
+A **single-portfolio hospitality platform** for an in-house group of lodging properties
+in **Canada and the USA** — a channel manager at its core (ingests bookings from every
+connected OTA, prevents double-bookings, pushes availability/rates/restrictions back out
+to every other channel), plus the property-management, revenue-management, finance,
+staff and guest-facing modules a real operation needs around it. The admin adds every
+property directly and assigns each one a dedicated manager/owner whose account is
+hard-restricted to just that property — nothing else in the portfolio. A platform
+**super admin** has full control over the whole portfolio and the global OTA catalogue.
 
 ## Modules
 
@@ -85,41 +86,31 @@ safe no-op ("not configured") until you add the relevant API key — see
 
 ---
 
-## Multi-tenant SaaS
+## Single portfolio, property-scoped managers
 
-Every tenant-owned table carries an `organizationId`; the OTA catalogue and `Plan`
-catalogue are the only platform-global data. See [`shared/src/plan-catalog.ts`](shared/src/plan-catalog.ts)
-for the seeded default packages — property count is the primary axis:
+There is exactly one `Organization` row — the portfolio — created transparently the
+first time it's needed (`backend/src/lib/portfolio.ts`); there's no self-serve signup and
+nothing to subscribe to. The super admin manages **Properties** directly from `/admin`:
+add a property with no count limit, and assign each one a dedicated manager/owner.
 
-| | Starter | Growth | Enterprise |
-|---|---|---|---|
-| Properties | 1 | up to 3 | up to 25 |
-| Channel connections | 3 | 10 | unlimited |
-| Channel categories | direct + global | + North America | + GDS |
-| Team members | 2 | 5 | 20 |
+That assignment (`User.assignedPropertyId`) is a **hard access boundary**, not a label.
+Every property-scoped route (bookings, calendar, finance, PMS, RMS, packages, reports,
+SEO, the page builder, dashboard, …) rejects access to any other property's data for that
+user — see `backend/src/lib/tenant.ts`'s `assertPropertyInScope` / `resolvePropertyFilter`
+/ `assertOwned`, applied consistently across `backend/src/modules/*`. Portfolio-wide
+surfaces that aren't about any one property (staff management, org branding, the payment
+gateway/Stripe Connect setup) are blocked for a scoped manager regardless of role rank
+(`requirePortfolioStaff`).
 
-Limits are enforced server-side (`backend/src/lib/limits.ts`) at the moment an owner tries
-to add a property/channel/user past their plan — the API returns `402` with a clear
-"upgrade to X" message the frontend turns into an upgrade prompt (`components/ui.tsx`'s
-`LimitBanner`). A super admin can override any organization's plan or status by hand at
-any time from `/admin`, no payment required.
+**Commission**: the per-booking platform cut (`Organization.commissionRateBps`) is a
+revenue-share concern, not SaaS billing, and stays — admin-settable from 0% to 100%
+(`/admin` → **Properties**, or the platform default under **Platform Settings**).
 
-**Self-serve signup** (`/signup` → `POST /api/auth/signup`) creates an `Organization` + a
-trial `Subscription` + the first admin `User` in one transaction, and auto-assigns a
-**dedicated support manager** from the platform staff pool (least-loaded first —
-`backend/src/lib/support.ts`), shown to the owner on their Billing page.
-
-**Billing** (`backend/src/modules/billing.ts`) works with or without Stripe: downgrades
-apply immediately; upgrades create a Stripe Checkout session when `STRIPE_SECRET_KEY` is
-set, and otherwise are recorded as a pending request the super admin/support manager
-actions manually (`backend/src/lib/stripe.ts` is a safe no-op until configured).
-
-**Super admin** (`/admin`, gated by `User.isSuperAdmin`, no `organizationId`) has full
-platform control: every organization (search, change plan/status, reassign support
-manager, impersonate for support), the plan catalogue, the global OTA catalogue,
-platform-wide settings and audit log, and the support-manager staff pool. Impersonation
-issues a short-lived (30 min) token scoped to that organization so support can see exactly
-what the owner sees.
+**Super admin** (`/admin`, gated by `User.isSuperAdmin`, no `organizationId`) manages
+every property and its assigned manager, the commission rate and Accelerator (now a
+free, admin-triggered feature — no Stripe checkout), the global OTA catalogue,
+platform-wide settings and the audit log. Impersonating a property opens a short-lived
+(30 min) token signed in as its assigned manager, so support can see exactly what they see.
 
 ---
 
@@ -162,23 +153,28 @@ Open **http://localhost:5173** and sign in:
 | Email | Password | Access |
 |---|---|---|
 | `superadmin@channelmanager.local` | `superadmin12345` | platform super admin → `/admin` |
-| `admin@channelmanager.local` | `admin12345` | "Demo Hotels" organization admin |
-| `manager@channelmanager.local` | `manager12345` | "Demo Hotels" organization manager |
-
-Or sign up a brand-new organization yourself at **/signup**.
+| `admin@channelmanager.local` | `admin12345` | portfolio-wide admin (sees every property) |
+| `manager@channelmanager.local` | `manager12345` | portfolio-wide manager |
+| `seaside.manager@channelmanager.local` | `property12345` | hard-scoped to the Seaside property only |
+| `alpine.manager@channelmanager.local` | `property12345` | hard-scoped to the Alpine property only |
+| `downtown.manager@channelmanager.local` | `property12345` | hard-scoped to the Downtown property only |
 
 ### See it work
 
-1. **Sign up** a new organization on the Starter plan, then try adding a 2nd property —
-   blocked with an upgrade prompt (Starter allows 1). Add a 4th on Growth — same thing
-   (Growth allows 3). Log in as the super admin, find the org under **Organizations**, and
-   bump its plan — the limit lifts immediately.
-2. **Simulator → Generate 20 bookings** across the connected mock channels. Watch
-   *Bookings* fill, *Calendar* availability drop, and *Sync Logs* show availability
+1. Log in as a `*.manager@channelmanager.local` property manager — the property switcher
+   in the header is locked to just that one property, and **Staff** is hidden from the nav.
+   Open devtools and try `GET /api/properties/<another property's id>` with that same
+   token — it 404s, same as it would for a property that doesn't exist.
+2. Log in as the **super admin** → **Properties**: add a new property (no count limit),
+   then **assign** it a manager — either an existing unassigned staff member or a brand
+   new account created on the spot.
+3. **Simulator → Generate 20 bookings** across the connected mock channels (log in as a
+   portfolio-wide admin/manager first, or a property manager to generate for just theirs).
+   Watch *Bookings* fill, *Calendar* availability drop, and *Sync Logs* show availability
    pushes fanning out to the other channels.
-3. **Simulator → Force an overbooking**. *Conflicts* gets a new `double_booking` /
+4. **Simulator → Force an overbooking**. *Conflicts* gets a new `double_booking` /
    `overbooking` alert and the offending reservation is `rejected` (auto-protect).
-4. **Simulator → Start autopilot** to have the worker's poll loop invent a steady
+5. **Simulator → Start autopilot** to have the worker's poll loop invent a steady
    stream of bookings; the dashboard updates live.
 
 ---
@@ -205,8 +201,7 @@ matching environment variable(s) to `.env`. Nothing else changes — same UI, sa
 
 | Feature | Env vars | Provider assumed |
 |---|---|---|
-| Guest payments | `STRIPE_SECRET_KEY` | Stripe (PaymentIntents) — `backend/src/lib/payments/` |
-| Subscription billing | `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET` | Stripe Checkout — `backend/src/lib/stripe.ts` |
+| Guest payments + payout | `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET` | Stripe (PaymentIntents + Connect) — `backend/src/lib/payments/`, `backend/src/lib/connect.ts` |
 | Email notifications | `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `SMTP_FROM` | Any SMTP provider (Postmark, SES, SendGrid SMTP, …) — `backend/src/lib/notify/email.ts` |
 | SMS notifications | `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_FROM_NUMBER` | Twilio — `backend/src/lib/notify/sms.ts` |
 | AI assistant + suggestions | `ANTHROPIC_API_KEY` | Claude API — `backend/src/lib/ai/claude.ts` |
@@ -234,7 +229,7 @@ A `docker-compose.yml` is included for running Postgres anywhere Docker is avail
 
 Set real secrets in production: `JWT_SECRET`, `CM_SECRET` (32+ chars, encrypts channel
 credentials at rest, identical across the web and worker processes), and optionally
-`STRIPE_SECRET_KEY` / `STRIPE_WEBHOOK_SECRET` to turn on real billing.
+`STRIPE_SECRET_KEY` / `STRIPE_WEBHOOK_SECRET` to turn on real guest payments and payouts.
 
 ---
 

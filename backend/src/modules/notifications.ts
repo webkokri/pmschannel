@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { prisma } from '../db';
 import { asyncHandler, badRequest, parse } from '../lib/http';
-import { requireOrg } from '../lib/tenant';
+import { requireOrg, requirePortfolioStaff } from '../lib/tenant';
 import { requirePermission } from '../lib/permissions';
 import { setOrgSetting } from '../lib/settings';
 import { DEFAULT_TEMPLATES, getNotificationConfig, getTemplate, sendTest } from '../lib/notify/send';
@@ -10,7 +10,7 @@ import { emailConfigured } from '../lib/notify/email';
 import { smsConfigured } from '../lib/notify/sms';
 
 export const notificationsRouter = Router();
-notificationsRouter.use(requireOrg);
+notificationsRouter.use(requireOrg, requirePortfolioStaff);
 
 notificationsRouter.get(
   '/config',

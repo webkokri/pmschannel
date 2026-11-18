@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { nightsBetween, todayIso, addDays } from '@cm/shared';
 import { prisma } from '../db';
 import { asyncHandler, badRequest } from '../lib/http';
-import { requireOrg } from '../lib/tenant';
+import { requireOrg, resolvePropertyFilter } from '../lib/tenant';
 
 export const reportsRouter = Router();
 reportsRouter.use(requireOrg);
@@ -38,7 +38,7 @@ reportsRouter.get(
   '/occupancy',
   asyncHandler(async (req, res) => {
     const organizationId = req.user!.organizationId!;
-    const propertyId = req.query.propertyId ? String(req.query.propertyId) : undefined;
+    const propertyId = resolvePropertyFilter(req, req.query.propertyId ? String(req.query.propertyId) : undefined);
     const { from, to } = dateRange(req);
     const dates = nightsBetween(from, addDays(to, 1));
     const dateObjs = dates.map((d) => new Date(d + 'T00:00:00Z'));
@@ -73,7 +73,7 @@ reportsRouter.get(
   '/revenue',
   asyncHandler(async (req, res) => {
     const organizationId = req.user!.organizationId!;
-    const propertyId = req.query.propertyId ? String(req.query.propertyId) : undefined;
+    const propertyId = resolvePropertyFilter(req, req.query.propertyId ? String(req.query.propertyId) : undefined);
     const { from, to } = dateRange(req);
 
     const bookings = await prisma.booking.findMany({
@@ -109,7 +109,7 @@ reportsRouter.get(
   '/booking-source',
   asyncHandler(async (req, res) => {
     const organizationId = req.user!.organizationId!;
-    const propertyId = req.query.propertyId ? String(req.query.propertyId) : undefined;
+    const propertyId = resolvePropertyFilter(req, req.query.propertyId ? String(req.query.propertyId) : undefined);
     const { from, to } = dateRange(req);
 
     const groups = await prisma.booking.groupBy({

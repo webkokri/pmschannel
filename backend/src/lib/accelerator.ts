@@ -1,4 +1,4 @@
-import { DEFAULT_ACCELERATOR_CHANNEL_CODES, DEFAULT_ACCELERATOR_PRICE_CENTS } from '@cm/shared';
+import { DEFAULT_ACCELERATOR_CHANNEL_CODES } from '@cm/shared';
 import { prisma } from '../db';
 import { logger } from './logger';
 import { getPlatformSetting } from './platform-settings';
@@ -9,21 +9,16 @@ export async function getAcceleratorChannelCodes(): Promise<string[]> {
   return (await getPlatformSetting<string[]>('accelerator:channelCodes')) ?? DEFAULT_ACCELERATOR_CHANNEL_CODES;
 }
 
-export async function getAcceleratorPriceCents(): Promise<number> {
-  return (await getPlatformSetting<number>('accelerator:priceCents')) ?? DEFAULT_ACCELERATOR_PRICE_CENTS;
-}
-
 /**
  * Activates the Accelerator for an organization: marks it active and, for every property,
- * enables a `ChannelConnection` (flagged `viaAccelerator`, so it doesn't count against the
- * plan's channel limit) for every bundle channel not already connected. Room mappings
- * still need the owner's external room IDs — this is "get listed everywhere," not
- * "auto-configure everywhere," since we have no real credentials to map against; the org
- * sees a "needs mapping" prompt in Channels for each one, same as any other new connection.
+ * enables a `ChannelConnection` (flagged `viaAccelerator`) for every bundle channel not
+ * already connected. Room mappings still need the owner's external room IDs — this is
+ * "get listed everywhere," not "auto-configure everywhere," since we have no real
+ * credentials to map against; the org sees a "needs mapping" prompt in Channels for each
+ * one, same as any other new connection. Free, admin-triggered — no payment involved.
  */
 export async function activateAccelerator(
   organizationId: string,
-  opts: { priceCentsPaid?: number; stripePaymentIntentId?: string } = {},
 ): Promise<{ connectionsCreated: number; channelCodes: string[] }> {
   const channelCodes = await getAcceleratorChannelCodes();
   const channels = await prisma.channel.findMany({ where: { code: { in: channelCodes }, active: true } });
@@ -63,16 +58,12 @@ export async function activateAccelerator(
       organizationId,
       active: true,
       activatedAt: new Date(),
-      priceCentsPaid: opts.priceCentsPaid,
-      stripePaymentIntentId: opts.stripePaymentIntentId,
       boostedChannelCodes: channelCodes,
     },
     update: {
       active: true,
       activatedAt: new Date(),
       deactivatedAt: null,
-      priceCentsPaid: opts.priceCentsPaid,
-      stripePaymentIntentId: opts.stripePaymentIntentId,
       boostedChannelCodes: channelCodes,
     },
   });

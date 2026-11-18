@@ -1,29 +1,12 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import request from 'supertest';
+import bcrypt from 'bcryptjs';
 import { createApp } from '../src/app';
 import { prisma } from '../src/db';
-import { DEFAULT_PLANS, FULL_CHANNEL_CATALOG } from '@cm/shared';
+import { FULL_CHANNEL_CATALOG } from '@cm/shared';
 
 const app = createApp();
 const PREFIX = `pms_test_${Date.now().toString(36)}`;
-
-async function ensurePlans() {
-  for (const p of DEFAULT_PLANS) {
-    await prisma.plan.upsert({
-      where: { code: p.code },
-      update: { limits: p.limits as object },
-      create: {
-        code: p.code,
-        name: p.name,
-        description: p.description,
-        priceMonthlyCents: p.priceMonthlyCents,
-        priceYearlyCents: p.priceYearlyCents,
-        limits: p.limits as object,
-        sortOrder: p.sortOrder,
-      },
-    });
-  }
-}
 
 async function ensureChannel(code: string) {
   const def = FULL_CHANNEL_CATALOG.find((c) => c.code === code)!;
@@ -44,25 +27,25 @@ async function ensureChannel(code: string) {
   });
 }
 
-let signupCounter = 0;
-async function signupAndLogin(planCode: string) {
-  const email = `${PREFIX}_${planCode}_${++signupCounter}@example.com`;
-  const res = await request(app)
-    .post('/api/auth/signup')
-    .send({ organizationName: `${PREFIX} ${planCode} ${signupCounter}`, name: 'Owner', email, password: 'password123', planCode });
-  expect(res.status).toBe(201);
-  const token = res.body.token as string;
+let userCounter = 0;
+async function createAdminAndProperty() {
+  const n = ++userCounter;
+  const organization = await prisma.organization.create({
+    data: { name: `${PREFIX} ${n}`, slug: `${PREFIX}-${n}`, contactEmail: 'test@example.com' },
+  });
+  const email = `${PREFIX}_${n}@example.com`;
+  await prisma.user.create({
+    data: { organizationId: organization.id, email, name: 'Owner', role: 'admin', passwordHash: await bcrypt.hash('password123', 4) },
+  });
+  const login = await request(app).post('/api/auth/login').send({ email, password: 'password123' });
+  const token = login.body.token as string;
   const property = await request(app)
     .post('/api/properties')
     .set('authorization', `Bearer ${token}`)
-    .send({ code: `${PREFIX}-${signupCounter}`, name: 'Test Property' });
+    .send({ code: `${PREFIX}-${n}`, name: 'Test Property' });
   expect(property.status).toBe(201);
   return { token, propertyId: property.body.property.id as string };
 }
-
-beforeAll(async () => {
-  await ensurePlans();
-});
 
 afterAll(async () => {
   await prisma.organization.deleteMany({ where: { name: { startsWith: PREFIX } } });
@@ -76,20 +59,9 @@ describe('third-party PMS connectors (WebRezPro, AutoClerk, Jonas Chorum, etc.)'
     expect(webrezpro.authType).toBe('api_key');
   });
 
-  it('a Starter org is blocked from connecting a PMS integration (plan gate)', async () => {
-    const channel = await ensureChannel('webrezpro');
-    const { token, propertyId } = await signupAndLogin('starter');
-    const res = await request(app)
-      .post('/api/channels/connections')
-      .set('authorization', `Bearer ${token}`)
-      .send({ propertyId, channelId: channel.id, enabled: true });
-    expect(res.status).toBe(403);
-    expect(res.body.error).toMatch(/property management/i);
-  });
-
-  it('a Growth org can connect, configure credentials, and test a PMS connection', async () => {
+  it('connects, configures credentials, and tests a PMS connection — no plan gate', async () => {
     const channel = await ensureChannel('autoclerk');
-    const { token, propertyId } = await signupAndLogin('growth');
+    const { token, propertyId } = await createAdminAndProperty();
 
     const connect = await request(app)
       .post('/api/channels/connections')
@@ -117,9 +89,9 @@ describe('third-party PMS connectors (WebRezPro, AutoClerk, Jonas Chorum, etc.)'
     expect(tested.body.result.message).toMatch(/AutoClerk/);
   });
 
-  it('accelerator-style bulk connections are unaffected — PMS connections count as normal channel usage', async () => {
+  it('a PMS connection is a normal (non-accelerator) connection', async () => {
     const channel = await ensureChannel('mews');
-    const { token, propertyId } = await signupAndLogin('growth');
+    const { token, propertyId } = await createAdminAndProperty();
     const connect = await request(app)
       .post('/api/channels/connections')
       .set('authorization', `Bearer ${token}`)

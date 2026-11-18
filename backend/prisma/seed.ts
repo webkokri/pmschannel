@@ -1,6 +1,6 @@
 import bcrypt from 'bcryptjs';
 import { PrismaClient } from '@prisma/client';
-import { DEFAULT_PLANS, FULL_CHANNEL_CATALOG, addDays, nightsBetween, todayIso } from '@cm/shared';
+import { FULL_CHANNEL_CATALOG, addDays, nightsBetween, todayIso } from '@cm/shared';
 
 const prisma = new PrismaClient();
 
@@ -17,31 +17,6 @@ const randInt = (min: number, max: number) => Math.floor(Math.random() * (max - 
 async function main() {
   console.log('Seeding channel manager…');
 
-  // ── Platform: plans ──────────────────────────────────────────────────────
-  for (const p of DEFAULT_PLANS) {
-    await prisma.plan.upsert({
-      where: { code: p.code },
-      update: {
-        name: p.name,
-        description: p.description,
-        priceMonthlyCents: p.priceMonthlyCents,
-        priceYearlyCents: p.priceYearlyCents,
-        limits: p.limits as object,
-        sortOrder: p.sortOrder,
-      },
-      create: {
-        code: p.code,
-        name: p.name,
-        description: p.description,
-        priceMonthlyCents: p.priceMonthlyCents,
-        priceYearlyCents: p.priceYearlyCents,
-        limits: p.limits as object,
-        sortOrder: p.sortOrder,
-      },
-    });
-  }
-  const enterprisePlan = await prisma.plan.findUniqueOrThrow({ where: { code: 'enterprise' } });
-
   // ── Platform: super admin ────────────────────────────────────────────────
   await prisma.user.upsert({
     where: { email: SUPERADMIN_EMAIL.toLowerCase() },
@@ -55,53 +30,20 @@ async function main() {
     },
   });
 
-  // ── Platform: dedicated support manager pool ────────────────────────────
-  const supportStaff = [
-    { email: 'priya.support@channelmanager.local', name: 'Priya Chandran' },
-    { email: 'marcus.support@channelmanager.local', name: 'Marcus Bell' },
-  ];
-  for (const s of supportStaff) {
-    await prisma.user.upsert({
-      where: { email: s.email },
-      update: {},
-      create: {
-        email: s.email,
-        name: s.name,
-        role: 'viewer',
-        isSupportManager: true,
-        passwordHash: await bcrypt.hash('support12345', 10),
-      },
-    });
-  }
-  const firstSupportManager = await prisma.user.findUniqueOrThrow({ where: { email: supportStaff[0].email } });
-
-  // ── Tenant: "Demo Hotels" organization ───────────────────────────────────
+  // ── The single portfolio ──────────────────────────────────────────────────
   const org = await prisma.organization.upsert({
-    where: { slug: 'demo-hotels' },
+    where: { slug: 'portfolio' },
     update: {},
     create: {
-      name: 'Demo Hotels',
-      slug: 'demo-hotels',
+      name: 'Head Office',
+      slug: 'portfolio',
       contactEmail: ADMIN_EMAIL.toLowerCase(),
       country: 'US',
       currency: 'USD',
-      status: 'active',
-      supportManagerId: firstSupportManager.id,
-      supportManagerAssignedAt: new Date(),
-    },
-  });
-  await prisma.subscription.upsert({
-    where: { organizationId: org.id },
-    update: { planId: enterprisePlan.id, status: 'active' },
-    create: {
-      organizationId: org.id,
-      planId: enterprisePlan.id,
-      status: 'active',
-      currentPeriodEnd: new Date(addDays(todayIso(), 365) + 'T00:00:00Z'),
     },
   });
 
-  // ── Tenant users ─────────────────────────────────────────────────────────
+  // ── Portfolio-wide staff ──────────────────────────────────────────────────
   await prisma.user.upsert({
     where: { email: ADMIN_EMAIL.toLowerCase() },
     update: { organizationId: org.id },
@@ -119,7 +61,7 @@ async function main() {
     create: {
       organizationId: org.id,
       email: 'manager@channelmanager.local',
-      name: 'Property Manager',
+      name: 'Operations Manager',
       role: 'manager',
       passwordHash: await bcrypt.hash('manager12345', 10),
     },
@@ -304,6 +246,29 @@ async function main() {
     direct_web: 0,
   };
   const properties = await prisma.property.findMany({ where: { organizationId: org.id }, include: { roomTypes: true } });
+
+  // ── A dedicated, hard-restricted manager per property ────────────────────
+  const propertyManagerEmail: Record<string, string> = {
+    SEASIDE: 'seaside.manager@channelmanager.local',
+    ALPINE: 'alpine.manager@channelmanager.local',
+    DOWNTOWN: 'downtown.manager@channelmanager.local',
+  };
+  for (const property of properties) {
+    const email = propertyManagerEmail[property.code];
+    if (!email) continue;
+    await prisma.user.upsert({
+      where: { email },
+      update: { organizationId: org.id, assignedPropertyId: property.id },
+      create: {
+        organizationId: org.id,
+        email,
+        name: `${property.name.split(' ')[0]} Manager`,
+        role: 'admin',
+        assignedPropertyId: property.id,
+        passwordHash: await bcrypt.hash('property12345', 10),
+      },
+    });
+  }
 
   for (const property of properties) {
     for (const code of connectedCodes) {
@@ -581,8 +546,9 @@ async function main() {
   });
 
   console.log(`Done. ${made} historical bookings, ${createdRooms.length} room types, ${channels.length} channels.`);
-  console.log(`Org admin login:   ${ADMIN_EMAIL} / ${ADMIN_PASSWORD}`);
-  console.log(`Super admin login: ${SUPERADMIN_EMAIL} / ${SUPERADMIN_PASSWORD}`);
+  console.log(`Super admin login:     ${SUPERADMIN_EMAIL} / ${SUPERADMIN_PASSWORD}`);
+  console.log(`Portfolio admin login: ${ADMIN_EMAIL} / ${ADMIN_PASSWORD}`);
+  console.log('Property manager logins: <property>.manager@channelmanager.local / property12345 (seaside/alpine/downtown)');
 }
 
 main()

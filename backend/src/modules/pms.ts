@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { todayIso } from '@cm/shared';
 import { prisma } from '../db';
 import { asyncHandler, badRequest, notFound, parse } from '../lib/http';
-import { requireOrg, assertOwned } from '../lib/tenant';
+import { assertOwned, assertPropertyInScope, requireOrg, resolvePropertyFilter } from '../lib/tenant';
 import { requireRole } from '../auth';
 import { requirePermission } from '../lib/permissions';
 
@@ -12,12 +12,13 @@ pmsRouter.use(requireOrg);
 
 // ── Room units ───────────────────────────────────────────────────────────────
 
-async function assertRoomTypeOwned(roomTypeId: string, organizationId: string) {
+async function assertRoomTypeOwned(roomTypeId: string, organizationId: string, req: import('express').Request) {
   const room = await prisma.roomType.findUnique({
     where: { id: roomTypeId },
     include: { property: { select: { organizationId: true } } },
   });
   if (!room || room.property.organizationId !== organizationId) throw notFound('Room type not found');
+  assertPropertyInScope(room.propertyId, req);
   return room;
 }
 
@@ -25,7 +26,7 @@ pmsRouter.get(
   '/room-units',
   asyncHandler(async (req, res) => {
     const roomTypeId = req.query.roomTypeId ? String(req.query.roomTypeId) : undefined;
-    const propertyId = req.query.propertyId ? String(req.query.propertyId) : undefined;
+    const propertyId = resolvePropertyFilter(req, req.query.propertyId ? String(req.query.propertyId) : undefined);
     const organizationId = req.user!.organizationId!;
     const units = await prisma.roomUnit.findMany({
       where: {
@@ -51,7 +52,7 @@ pmsRouter.post(
   requireRole('manager'),
   asyncHandler(async (req, res) => {
     const body = parse(unitInput, req.body);
-    await assertRoomTypeOwned(body.roomTypeId, req.user!.organizationId!);
+    await assertRoomTypeOwned(body.roomTypeId, req.user!.organizationId!, req);
     const unit = await prisma.roomUnit.create({ data: body });
     res.status(201).json({ unit });
   }),
@@ -68,6 +69,7 @@ pmsRouter.patch(
     if (!existing || existing.roomType.property.organizationId !== req.user!.organizationId) {
       throw notFound('Room unit not found');
     }
+    assertPropertyInScope(existing.roomType.propertyId, req);
     const body = parse(unitInput.partial().omit({ roomTypeId: true }), req.body);
     const unit = await prisma.roomUnit.update({ where: { id: req.params.id }, data: body });
     res.json({ unit });
@@ -79,7 +81,7 @@ pmsRouter.get(
   '/housekeeping',
   asyncHandler(async (req, res) => {
     const organizationId = req.user!.organizationId!;
-    const propertyId = req.query.propertyId ? String(req.query.propertyId) : undefined;
+    const propertyId = resolvePropertyFilter(req, req.query.propertyId ? String(req.query.propertyId) : undefined);
     const units = await prisma.roomUnit.findMany({
       where: { roomType: { property: { organizationId, id: propertyId } } },
       orderBy: [{ roomType: { name: 'asc' } }, { unitNumber: 'asc' }],
@@ -96,9 +98,9 @@ pmsRouter.get(
   '/board',
   asyncHandler(async (req, res) => {
     const organizationId = req.user!.organizationId!;
-    const propertyId = req.query.propertyId ? String(req.query.propertyId) : undefined;
+    const propertyId = resolvePropertyFilter(req, req.query.propertyId ? String(req.query.propertyId) : undefined);
     if (!propertyId) throw badRequest('propertyId is required');
-    await assertOwned(() => prisma.property.findUnique({ where: { id: propertyId } }), organizationId, 'Property');
+    await assertOwned(() => prisma.property.findUnique({ where: { id: propertyId } }), organizationId, 'Property', req);
     const date = String(req.query.date ?? todayIso());
     const dateStart = new Date(date + 'T00:00:00Z');
 
@@ -135,10 +137,8 @@ pmsRouter.get(
   }),
 );
 
-async function assertBookingOwned(bookingId: string, organizationId: string) {
-  const booking = await prisma.booking.findUnique({ where: { id: bookingId } });
-  if (!booking || booking.organizationId !== organizationId) throw notFound('Booking not found');
-  return booking;
+async function assertBookingOwned(bookingId: string, organizationId: string, req: import('express').Request) {
+  return assertOwned(() => prisma.booking.findUnique({ where: { id: bookingId } }), organizationId, 'Booking', req);
 }
 
 const checkInInput = z.object({ roomUnitId: z.string().nullish() });
@@ -148,7 +148,7 @@ pmsRouter.post(
   requirePermission('pms.manage'),
   asyncHandler(async (req, res) => {
     const organizationId = req.user!.organizationId!;
-    const booking = await assertBookingOwned(req.params.id, organizationId);
+    const booking = await assertBookingOwned(req.params.id, organizationId, req);
     if (booking.checkedInAt) throw badRequest('Already checked in');
     const body = parse(checkInInput, req.body);
 
@@ -177,7 +177,7 @@ pmsRouter.post(
   requirePermission('pms.manage'),
   asyncHandler(async (req, res) => {
     const organizationId = req.user!.organizationId!;
-    const booking = await assertBookingOwned(req.params.id, organizationId);
+    const booking = await assertBookingOwned(req.params.id, organizationId, req);
     if (!booking.checkedInAt) throw badRequest('Not checked in yet');
     if (booking.checkedOutAt) throw badRequest('Already checked out');
 

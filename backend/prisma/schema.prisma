@@ -1,8 +1,11 @@
 // Channel Manager — data model
 // Postgres. Generate the client with `npm run -w backend prisma:generate`.
 //
-// Multi-tenant SaaS: every tenant-owned table carries `organizationId`. `Channel` (the
-// OTA catalogue) and `Plan` are platform-global reference data shared by all tenants.
+// Single-portfolio operation: one Organization (created once) owns every Property.
+// `Channel` (the OTA catalogue) is platform-global reference data. Every property-owned
+// table still carries `organizationId` (there's only one, but the isolation code is
+// unchanged) and most also carry `propertyId` — `User.assignedPropertyId` hard-restricts
+// a dedicated property manager/owner's account to just that one property.
 
 generator client {
   provider = "prisma-client-js"
@@ -14,41 +17,31 @@ datasource db {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Platform: organizations (tenants), plans, subscriptions, invoices
+// Platform: the single organization (portfolio)
 // ─────────────────────────────────────────────────────────────────────────────
 
-enum OrganizationStatus {
-  trialing
-  active
-  past_due
-  suspended
-  canceled
-}
-
 model Organization {
-  id              String             @id @default(cuid())
-  name            String
-  slug            String             @unique
-  contactEmail    String
-  country         String             @default("US")
-  currency        String             @default("USD")
-  status          OrganizationStatus @default(trialing)
-  trialEndsAt     DateTime?
-  suspendedAt     DateTime?
-  suspendedReason String?
+  id            String   @id @default(cuid())
+  name          String
+  slug          String   @unique
+  contactEmail  String
+  country       String   @default("US")
+  currency      String   @default("USD")
+  /// Portfolio-wide on/off switch (e.g. maintenance mode) — super admin only.
+  active        Boolean  @default(true)
   /// General settings (org profile) — shown on invoices, the public microsite, etc.
-  logoUrl         String             @default("")
-  brandColor      String             @default("#356ef4")
-  taxId           String             @default("")
-  invoiceFooter   String             @default("")
-  locale          String             @default("en-US")
-  createdAt       DateTime           @default(now())
-  updatedAt       DateTime           @updatedAt
+  logoUrl       String   @default("")
+  brandColor    String   @default("#356ef4")
+  taxId         String   @default("")
+  invoiceFooter String   @default("")
+  locale        String   @default("en-US")
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
 
-  // ── Platform commission + Stripe Connect payout account ──────────────────
-  /// Per-org override, in basis points (250 = 2.5%). Null = use the platform default
-  /// (PlatformSetting "commission:defaultRateBps").
-  commissionRateBps    Int?
+  // ── Commission + Stripe Connect payout account (per-booking head-office cut) ─
+  /// Override, in basis points (250 = 2.5%). Null = use the platform default
+  /// (PlatformSetting "commission:defaultRateBps"). Admin-settable, 0 to 100%.
+  commissionRateBps      Int?
   stripeConnectAccountId String?
   /// not_started | onboarding | active | restricted — kept in sync by the
   /// `account.updated` Stripe webhook.
@@ -63,8 +56,6 @@ model Organization {
   auditLogs          AuditLog[]
   syncJobs           SyncJob[]
   settings           Setting[]
-  subscription       Subscription?
-  invoices           Invoice[]
   expenses           Expense[]
   packages           Package[]
   pricingRules       PricingRule[]
@@ -73,95 +64,6 @@ model Organization {
   aiSuggestions      AiSuggestion[]
   notificationLogs   NotificationLog[]
   accelerator        Accelerator?
-
-  /// Dedicated support manager (platform staff) auto-assigned at signup.
-  supportManagerId         String?
-  supportManager           User?     @relation("SupportManagerFor", fields: [supportManagerId], references: [id], onDelete: SetNull)
-  supportManagerAssignedAt DateTime?
-}
-
-/// Platform-wide catalogue of subscription packages. Edited only by the super admin.
-model Plan {
-  id                String   @id @default(cuid())
-  code              String   @unique // starter | growth | enterprise | ...
-  name              String
-  description       String   @default("")
-  priceMonthlyCents Int      @default(0)
-  priceYearlyCents  Int      @default(0)
-  currency          String   @default("USD")
-  /// { maxProperties, maxRoomTypesPerProperty, maxChannelConnections, maxUsers, channelCategories: string[] }
-  limits            Json
-  isPublic          Boolean  @default(true)
-  sortOrder         Int      @default(0)
-  active            Boolean  @default(true)
-  createdAt         DateTime @default(now())
-  updatedAt         DateTime @updatedAt
-
-  subscriptions Subscription[]
-}
-
-enum SubscriptionStatus {
-  trialing
-  active
-  past_due
-  canceled
-  paused
-}
-
-enum BillingCycle {
-  monthly
-  yearly
-}
-
-model Subscription {
-  id             String       @id @default(cuid())
-  organizationId String       @unique
-  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  planId         String
-  plan           Plan         @relation(fields: [planId], references: [id])
-
-  status            SubscriptionStatus @default(trialing)
-  billingCycle      BillingCycle       @default(monthly)
-  currentPeriodEnd  DateTime?
-  cancelAtPeriodEnd Boolean            @default(false)
-  /// Set when the owner requests an upgrade and Stripe isn't configured — the super
-  /// admin sees this and actions it (or the owner completes Stripe Checkout instead).
-  pendingPlanId     String?
-
-  stripeCustomerId     String?
-  stripeSubscriptionId String?
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  invoices Invoice[]
-}
-
-enum InvoiceStatus {
-  draft
-  open
-  paid
-  void
-  uncollectible
-}
-
-model Invoice {
-  id             String        @id @default(cuid())
-  organizationId String
-  organization   Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  subscriptionId String?
-  subscription   Subscription? @relation(fields: [subscriptionId], references: [id], onDelete: SetNull)
-
-  amountCents     Int
-  currency        String        @default("USD")
-  status          InvoiceStatus @default(open)
-  issuedAt        DateTime      @default(now())
-  dueAt           DateTime?
-  paidAt          DateTime?
-  stripeInvoiceId String?
-  note            String        @default("")
-
-  @@index([organizationId])
 }
 
 /// Platform-wide toggles the super admin controls (not tenant-scoped).
@@ -182,33 +84,35 @@ enum UserRole {
 }
 
 model User {
-  id             String        @id @default(cuid())
-  email          String        @unique
-  name           String
-  passwordHash   String
+  id                 String        @id @default(cuid())
+  email              String        @unique
+  name               String
+  passwordHash       String
   /// Role *within* the organization. Meaningless for platform staff (isSuperAdmin).
-  role           UserRole      @default(viewer)
+  role               UserRole      @default(viewer)
   /// Platform-level super admin — not a member of any organization, full control.
-  isSuperAdmin   Boolean       @default(false)
-  /// Platform staff eligible to be auto-assigned as an organization's dedicated
-  /// support manager. Also has `organizationId = null`.
-  isSupportManager Boolean     @default(false)
-  organizationId String?
-  organization   Organization? @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  active         Boolean       @default(true)
+  isSuperAdmin       Boolean       @default(false)
+  organizationId     String?
+  organization       Organization? @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  /// Hard-restricts a dedicated property manager/owner to this one property — every
+  /// property-scoped route rejects access to any other property's data for this user.
+  /// Null means portfolio-wide staff (today's org-member behavior).
+  assignedPropertyId String?
+  assignedProperty   Property?     @relation("PropertyManager", fields: [assignedPropertyId], references: [id], onDelete: SetNull)
+  active             Boolean       @default(true)
   /// Staff directory fields.
-  title          String        @default("")
-  department     String        @default("")
-  phone          String        @default("")
+  title              String        @default("")
+  department         String        @default("")
+  phone              String        @default("")
   /// Granular permission overlay checked *in addition to* the role rank above
   /// (e.g. "finance.manage", "notifications.manage") — see lib/permissions.ts.
-  permissions    String[]      @default([])
-  createdAt      DateTime      @default(now())
-  updatedAt      DateTime      @updatedAt
-  auditLogs      AuditLog[]
-  supportedOrganizations Organization[] @relation("SupportManagerFor")
+  permissions        String[]      @default([])
+  createdAt          DateTime      @default(now())
+  updatedAt          DateTime      @updatedAt
+  auditLogs          AuditLog[]
 
   @@index([organizationId])
+  @@index([assignedPropertyId])
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -240,6 +144,8 @@ model Property {
   seo                PropertySeo?
   faqs               PropertyFaq[]
   pageContent        PropertyPageContent?
+  /// Dedicated manager(s)/owner(s) hard-restricted to this property (see User.assignedPropertyId).
+  assignedManagers   User[]               @relation("PropertyManager")
 
   @@index([organizationId])
 }
@@ -255,26 +161,26 @@ enum RoomCategory {
 }
 
 model RoomType {
-  id         String   @id @default(cuid())
-  propertyId String
-  property   Property @relation(fields: [propertyId], references: [id], onDelete: Cascade)
-  code       String
-  name       String
-  category   RoomCategory @default(standard)
-  totalUnits Int      @default(1)
-  maxOccupancy Int    @default(2)
-  basePrice  Decimal  @default(0) @db.Decimal(10, 2)
-  createdAt  DateTime @default(now())
-  updatedAt  DateTime @updatedAt
+  id           String       @id @default(cuid())
+  propertyId   String
+  property     Property     @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+  code         String
+  name         String
+  category     RoomCategory @default(standard)
+  totalUnits   Int          @default(1)
+  maxOccupancy Int          @default(2)
+  basePrice    Decimal      @default(0) @db.Decimal(10, 2)
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
 
-  ratePlans     RatePlan[]
-  calendarDays  CalendarDay[]
-  roomMappings  RoomMapping[]
-  bookings      Booking[]
-  conflicts     ConflictAlert[]
-  units         RoomUnit[]
-  packages      Package[]
-  pricingRules  PricingRule[]
+  ratePlans    RatePlan[]
+  calendarDays CalendarDay[]
+  roomMappings RoomMapping[]
+  bookings     Booking[]
+  conflicts    ConflictAlert[]
+  units        RoomUnit[]
+  packages     Package[]
+  pricingRules PricingRule[]
 
   @@unique([propertyId, code])
 }
@@ -304,19 +210,19 @@ model RoomUnit {
 }
 
 model RatePlan {
-  id           String   @id @default(cuid())
-  roomTypeId   String
-  roomType     RoomType @relation(fields: [roomTypeId], references: [id], onDelete: Cascade)
-  code         String
-  name         String
-  mealPlan     String   @default("room_only") // room_only | breakfast | half_board | all_inclusive
-  cancellationPolicy String @default("flexible")
+  id                 String   @id @default(cuid())
+  roomTypeId         String
+  roomType           RoomType @relation(fields: [roomTypeId], references: [id], onDelete: Cascade)
+  code               String
+  name               String
+  mealPlan           String   @default("room_only") // room_only | breakfast | half_board | all_inclusive
+  cancellationPolicy String   @default("flexible")
   // Optional derived pricing: price = parent rate * (1 + adjustPct/100) + adjustFlat
-  derivedFromId String?
-  adjustPct     Float   @default(0)
-  adjustFlat    Decimal @default(0) @db.Decimal(10, 2)
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  derivedFromId      String?
+  adjustPct          Float    @default(0)
+  adjustFlat         Decimal  @default(0) @db.Decimal(10, 2)
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
 
   roomMappings RoomMapping[]
   bookings     Booking[]
@@ -338,7 +244,7 @@ model Channel {
   id           String      @id @default(cuid())
   code         String      @unique // matches shared/ota-catalog codes
   name         String
-  category     String      // global | north_america | direct_misc
+  category     String // global | north_america | direct_misc
   kind         ChannelKind
   authType     String
   markets      String[]
@@ -384,10 +290,10 @@ model ChannelConnection {
   /// who can look up a property code and POST a fake "booking".
   webhookSecret    String  @default("")
 
-  lastPolledAt   DateTime?
-  lastPushAt     DateTime?
-  lastError      String?
-  status         String    @default("disconnected") // disconnected | connected | error
+  lastPolledAt DateTime?
+  lastPushAt   DateTime?
+  lastError    String?
+  status       String    @default("disconnected") // disconnected | connected | error
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -424,15 +330,15 @@ model RoomMapping {
 // ─────────────────────────────────────────────────────────────────────────────
 
 model CalendarDay {
-  id            String   @id @default(cuid())
-  roomTypeId    String
-  roomType      RoomType @relation(fields: [roomTypeId], references: [id], onDelete: Cascade)
-  date          DateTime @db.Date
+  id         String   @id @default(cuid())
+  roomTypeId String
+  roomType   RoomType @relation(fields: [roomTypeId], references: [id], onDelete: Cascade)
+  date       DateTime @db.Date
 
-  price          Decimal @default(0) @db.Decimal(10, 2)
-  availableUnits Int     @default(0)
-  minStay        Int     @default(1)
-  maxStay        Int     @default(0) // 0 = no cap
+  price             Decimal @default(0) @db.Decimal(10, 2)
+  availableUnits    Int     @default(0)
+  minStay           Int     @default(1)
+  maxStay           Int     @default(0) // 0 = no cap
   closedToArrival   Boolean @default(false)
   closedToDeparture Boolean @default(false)
   stopSell          Boolean @default(false)
@@ -455,49 +361,49 @@ enum BookingStatus {
 }
 
 model Booking {
-  id             String        @id @default(cuid())
-  organizationId String
-  organization   Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  propertyId     String
-  property       Property      @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+  id              String       @id @default(cuid())
+  organizationId  String
+  organization    Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  propertyId      String
+  property        Property     @relation(fields: [propertyId], references: [id], onDelete: Cascade)
   sourceChannelId String
-  sourceChannel  Channel       @relation(fields: [sourceChannelId], references: [id])
-  roomTypeId     String?
-  roomType       RoomType?     @relation(fields: [roomTypeId], references: [id], onDelete: SetNull)
-  ratePlanId     String?
-  ratePlan       RatePlan?     @relation(fields: [ratePlanId], references: [id], onDelete: SetNull)
+  sourceChannel   Channel      @relation(fields: [sourceChannelId], references: [id])
+  roomTypeId      String?
+  roomType        RoomType?    @relation(fields: [roomTypeId], references: [id], onDelete: SetNull)
+  ratePlanId      String?
+  ratePlan        RatePlan?    @relation(fields: [ratePlanId], references: [id], onDelete: SetNull)
 
-  externalRef    String
-  status         BookingStatus @default(confirmed)
-  guestName      String
-  guestEmail     String?
-  guestPhone     String        @default("")
-  checkIn        DateTime      @db.Date
-  checkOut       DateTime      @db.Date
-  unitsBooked    Int           @default(1)
+  externalRef String
+  status      BookingStatus @default(confirmed)
+  guestName   String
+  guestEmail  String?
+  guestPhone  String        @default("")
+  checkIn     DateTime      @db.Date
+  checkOut    DateTime      @db.Date
+  unitsBooked Int           @default(1)
   /// Party size — not reported by every OTA, so these default to a reasonable single
   /// occupant rather than being left unknown; the direct-booking search form always
   /// collects them.
-  adults         Int           @default(1)
-  children       Int           @default(0)
-  currency       String        @default("USD")
-  amount         Decimal       @default(0) @db.Decimal(10, 2)
+  adults      Int           @default(1)
+  children    Int           @default(0)
+  currency    String        @default("USD")
+  amount      Decimal       @default(0) @db.Decimal(10, 2)
 
   // Set when the source room could not be mapped to a local RoomType.
-  unmapped       Boolean       @default(false)
-  externalRoomId String        @default("")
+  unmapped       Boolean @default(false)
+  externalRoomId String  @default("")
 
   // ── PMS front desk ──────────────────────────────────────────────────────────
   roomUnitId   String?
-  roomUnit     RoomUnit?  @relation(fields: [roomUnitId], references: [id], onDelete: SetNull)
+  roomUnit     RoomUnit? @relation(fields: [roomUnitId], references: [id], onDelete: SetNull)
   checkedInAt  DateTime?
   checkedOutAt DateTime?
 
-  rawPayload     Json
-  receivedAt     DateTime      @default(now())
-  bookedAt       DateTime?
-  createdAt      DateTime      @default(now())
-  updatedAt      DateTime      @updatedAt
+  rawPayload Json
+  receivedAt DateTime  @default(now())
+  bookedAt   DateTime?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
 
   nights   BookingNight[]
   payments Payment[]
@@ -537,8 +443,8 @@ model SyncJob {
   organization        Organization      @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   channelConnectionId String
   channelConnection   ChannelConnection @relation(fields: [channelConnectionId], references: [id], onDelete: Cascade)
-  direction           String            // push | pull
-  entityType          String            // availability | rates | restrictions | booking_ack
+  direction           String // push | pull
+  entityType          String // availability | rates | restrictions | booking_ack
   payload             Json
   status              SyncJobStatus     @default(pending)
   attempts            Int               @default(0)
@@ -556,20 +462,20 @@ model SyncJob {
 }
 
 model SyncLog {
-  id                  String            @id @default(cuid())
+  id                  String             @id @default(cuid())
   syncJobId           String?
-  syncJob             SyncJob?          @relation(fields: [syncJobId], references: [id], onDelete: SetNull)
+  syncJob             SyncJob?           @relation(fields: [syncJobId], references: [id], onDelete: SetNull)
   channelConnectionId String?
   channelConnection   ChannelConnection? @relation(fields: [channelConnectionId], references: [id], onDelete: SetNull)
   direction           String
   entityType          String
   ok                  Boolean
-  attempt             Int      @default(1)
+  attempt             Int                @default(1)
   request             Json?
   response            Json?
-  message             String   @default("")
-  durationMs          Int      @default(0)
-  createdAt           DateTime @default(now())
+  message             String             @default("")
+  durationMs          Int                @default(0)
+  createdAt           DateTime           @default(now())
 
   @@index([createdAt])
   @@index([ok])
@@ -589,19 +495,19 @@ model ConflictAlert {
   id             String         @id @default(cuid())
   organizationId String
   organization   Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  type       String         // overbooking | double_booking | rate_mismatch | orphan_mapping
-  severity   String         @default("high") // low | medium | high | critical
-  roomTypeId String?
-  roomType   RoomType?      @relation(fields: [roomTypeId], references: [id], onDelete: SetNull)
-  fromDate   DateTime?      @db.Date
-  toDate     DateTime?      @db.Date
-  bookingIds String[]
-  details    Json
-  status     ConflictStatus @default(open)
-  resolutionNote String     @default("")
-  resolvedAt DateTime?
-  createdAt  DateTime       @default(now())
-  updatedAt  DateTime       @updatedAt
+  type           String // overbooking | double_booking | rate_mismatch | orphan_mapping
+  severity       String         @default("high") // low | medium | high | critical
+  roomTypeId     String?
+  roomType       RoomType?      @relation(fields: [roomTypeId], references: [id], onDelete: SetNull)
+  fromDate       DateTime?      @db.Date
+  toDate         DateTime?      @db.Date
+  bookingIds     String[]
+  details        Json
+  status         ConflictStatus @default(open)
+  resolutionNote String         @default("")
+  resolvedAt     DateTime?
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
 
   @@index([organizationId, status])
   @@index([type])
@@ -626,14 +532,14 @@ model AuditLog {
   id             String        @id @default(cuid())
   organizationId String?
   organization   Organization? @relation(fields: [organizationId], references: [id], onDelete: SetNull)
-  actorId   String?
-  actor     User?    @relation(fields: [actorId], references: [id], onDelete: SetNull)
-  action    String
-  entity    String
-  entityId  String
-  before    Json?
-  after     Json?
-  createdAt DateTime @default(now())
+  actorId        String?
+  actor          User?         @relation(fields: [actorId], references: [id], onDelete: SetNull)
+  action         String
+  entity         String
+  entityId       String
+  before         Json?
+  after          Json?
+  createdAt      DateTime      @default(now())
 
   @@index([entity, entityId])
   @@index([createdAt])
@@ -656,18 +562,18 @@ model Setting {
 // ─────────────────────────────────────────────────────────────────────────────
 
 model Expense {
-  id             String   @id @default(cuid())
+  id             String       @id @default(cuid())
   organizationId String
   organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   propertyId     String
-  property       Property @relation(fields: [propertyId], references: [id], onDelete: Cascade)
-  category       String   // utilities | payroll | maintenance | supplies | marketing | other
+  property       Property     @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+  category       String // utilities | payroll | maintenance | supplies | marketing | other
   amountCents    Int
-  currency       String   @default("USD")
-  incurredAt     DateTime @db.Date
-  vendor         String   @default("")
-  note           String   @default("")
-  createdAt      DateTime @default(now())
+  currency       String       @default("USD")
+  incurredAt     DateTime     @db.Date
+  vendor         String       @default("")
+  note           String       @default("")
+  createdAt      DateTime     @default(now())
 
   @@index([organizationId, incurredAt])
 }
@@ -682,21 +588,21 @@ enum PriceAdjustType {
 }
 
 model Package {
-  id                String          @id @default(cuid())
-  organizationId    String
-  organization      Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  propertyId        String
-  property          Property        @relation(fields: [propertyId], references: [id], onDelete: Cascade)
-  roomTypeId        String?
-  roomType          RoomType?       @relation(fields: [roomTypeId], references: [id], onDelete: SetNull)
-  name              String
-  description       String          @default("")
-  priceAdjustType   PriceAdjustType @default(flat)
-  priceValue        Decimal         @default(0) @db.Decimal(10, 2)
-  includedAddons    String[]
-  active            Boolean         @default(true)
-  createdAt         DateTime        @default(now())
-  updatedAt         DateTime        @updatedAt
+  id              String          @id @default(cuid())
+  organizationId  String
+  organization    Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  propertyId      String
+  property        Property        @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+  roomTypeId      String?
+  roomType        RoomType?       @relation(fields: [roomTypeId], references: [id], onDelete: SetNull)
+  name            String
+  description     String          @default("")
+  priceAdjustType PriceAdjustType @default(flat)
+  priceValue      Decimal         @default(0) @db.Decimal(10, 2)
+  includedAddons  String[]
+  active          Boolean         @default(true)
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
 
   @@index([organizationId])
 }
@@ -730,10 +636,10 @@ model Payment {
   // ── Platform commission split (guest pays us; we remit the rest to the property) ──
   /// The commission rate actually applied (basis points), captured at charge time so a
   /// later rate change never rewrites history.
-  commissionRateBps Int     @default(0)
-  commissionCents   Int     @default(0)
+  commissionRateBps      Int       @default(0)
+  commissionCents        Int       @default(0)
   /// amountCents − commissionCents — what the property is owed for this payment.
-  netCents          Int     @default(0)
+  netCents               Int       @default(0)
   /// Set when the split was executed as a Stripe Connect destination charge
   /// (transfer_data.destination) — i.e. the net amount already moved to the property's
   /// own Stripe account automatically. Null means the platform is still holding the
@@ -816,17 +722,17 @@ model PricingRule {
 }
 
 model PricingLog {
-  id             String   @id @default(cuid())
+  id             String       @id @default(cuid())
   organizationId String
   organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   roomTypeId     String
-  date           DateTime @db.Date
+  date           DateTime     @db.Date
   ruleId         String?
-  ruleName       String   @default("")
-  previousPrice  Decimal  @db.Decimal(10, 2)
-  newPrice       Decimal  @db.Decimal(10, 2)
-  reason         String   @default("")
-  createdAt      DateTime @default(now())
+  ruleName       String       @default("")
+  previousPrice  Decimal      @db.Decimal(10, 2)
+  newPrice       Decimal      @db.Decimal(10, 2)
+  reason         String       @default("")
+  createdAt      DateTime     @default(now())
 
   @@index([organizationId, createdAt])
   @@index([roomTypeId, date])
@@ -930,7 +836,7 @@ model NotificationLog {
   id             String              @id @default(cuid())
   organizationId String
   organization   Organization        @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  type           String              // booking_confirmation | booking_cancelled | overbooking_alert | test | ...
+  type           String // booking_confirmation | booking_cancelled | overbooking_alert | test | ...
   channel        NotificationChannel
   recipient      String
   status         NotificationStatus
@@ -945,17 +851,17 @@ model NotificationLog {
 // ─────────────────────────────────────────────────────────────────────────────
 
 model Accelerator {
-  id                  String       @id @default(cuid())
-  organizationId      String       @unique
-  organization        Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  active              Boolean      @default(false)
-  priceCentsPaid      Int?
+  id                    String       @id @default(cuid())
+  organizationId        String       @unique
+  organization          Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  active                Boolean      @default(false)
+  priceCentsPaid        Int?
   stripePaymentIntentId String?
   /// Channel codes this activation connected on the org's behalf (see shared/plan-catalog
   /// / PlatformSetting "accelerator:channelCodes" for the current bundle definition).
-  boostedChannelCodes String[]
-  activatedAt         DateTime?
-  deactivatedAt        DateTime?
-  createdAt           DateTime     @default(now())
-  updatedAt           DateTime     @updatedAt
+  boostedChannelCodes   String[]
+  activatedAt           DateTime?
+  deactivatedAt         DateTime?
+  createdAt             DateTime     @default(now())
+  updatedAt             DateTime     @updatedAt
 }

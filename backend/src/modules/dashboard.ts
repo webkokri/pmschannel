@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { addDays, nightsBetween, todayIso } from '@cm/shared';
 import { prisma } from '../db';
 import { asyncHandler } from '../lib/http';
-import { requireOrg } from '../lib/tenant';
+import { requireOrg, resolvePropertyFilter } from '../lib/tenant';
 import { decryptJson } from '../lib/crypto';
 
 export const dashboardRouter = Router();
@@ -16,7 +16,7 @@ dashboardRouter.get(
   '/',
   asyncHandler(async (req, res) => {
     const organizationId = req.user!.organizationId!;
-    const propertyId = req.query.propertyId ? String(req.query.propertyId) : undefined;
+    const propertyId = resolvePropertyFilter(req, req.query.propertyId ? String(req.query.propertyId) : undefined);
     const propFilter = { organizationId, ...(propertyId ? { propertyId } : {}) };
 
     const [
@@ -31,12 +31,14 @@ dashboardRouter.get(
     ] = await Promise.all([
       prisma.booking.count({ where: { ...propFilter, receivedAt: { gte: since(24) }, status: { not: 'rejected' } } }),
       prisma.booking.count({ where: { ...propFilter, receivedAt: { gte: since(24 * 7) }, status: { not: 'rejected' } } }),
-      prisma.conflictAlert.count({ where: { organizationId, status: 'open' } }),
+      prisma.conflictAlert.count({
+        where: { organizationId, status: 'open', ...(propertyId ? { roomType: { propertyId } } : {}) },
+      }),
       prisma.syncJob.count({ where: { organizationId, status: { in: ['pending', 'failed'] } } }),
       prisma.syncJob.count({ where: { organizationId, status: 'dead' } }),
       prisma.channel.count({ where: { active: true } }),
       prisma.channelConnection.findMany({ where: { ...propFilter, enabled: true }, select: { credentials: true } }),
-      prisma.property.count({ where: { organizationId } }),
+      prisma.property.count({ where: propFilter.propertyId ? { id: propFilter.propertyId } : { organizationId } }),
     ]);
     const connections = connectionRows.length;
     // How many of those connections are actually talking to the real OTA/PMS vs
@@ -126,7 +128,7 @@ dashboardRouter.get(
     });
 
     const conflictFeed = await prisma.conflictAlert.findMany({
-      where: { organizationId, status: 'open' },
+      where: { organizationId, status: 'open', ...(propertyId ? { roomType: { propertyId } } : {}) },
       orderBy: { createdAt: 'desc' },
       take: 6,
       include: { roomType: { select: { name: true } } },

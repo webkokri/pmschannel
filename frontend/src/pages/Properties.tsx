@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '@/api/client';
 import { useProperty } from '@/lib/property';
-import { CopyButton, Drawer, ErrorNote, LimitBanner, PageHeader, Spinner, Table } from '@/components/ui';
+import { CopyButton, Drawer, ErrorNote, PageHeader, Spinner, Table } from '@/components/ui';
 import { money } from '@/lib/format';
 
 interface RatePlan {
@@ -41,7 +41,7 @@ interface PropFull {
 }
 
 export function PropertiesPage() {
-  const { properties, selectedId, setSelectedId } = useProperty();
+  const { properties, selectedId, setSelectedId, locked } = useProperty();
   const qc = useQueryClient();
   const [addRoom, setAddRoom] = useState(false);
   const [addProp, setAddProp] = useState(false);
@@ -91,23 +91,27 @@ export function PropertiesPage() {
         title="Properties & rooms"
         subtitle="Inventory structure — properties, room types and rate plans"
         actions={
-          <button className="btn-primary" onClick={() => setAddProp(true)}>
-            + Property
-          </button>
+          !locked && (
+            <button className="btn-primary" onClick={() => setAddProp(true)}>
+              + Property
+            </button>
+          )
         }
       />
 
-      <div className="mb-4 flex flex-wrap gap-2">
-        {properties.map((p) => (
-          <button
-            key={p.id}
-            onClick={() => setSelectedId(p.id)}
-            className={p.id === selectedId ? 'btn-primary !py-1.5' : 'btn-ghost !py-1.5'}
-          >
-            {p.name}
-          </button>
-        ))}
-      </div>
+      {!locked && (
+        <div className="mb-4 flex flex-wrap gap-2">
+          {properties.map((p) => (
+            <button
+              key={p.id}
+              onClick={() => setSelectedId(p.id)}
+              className={p.id === selectedId ? 'btn-primary !py-1.5' : 'btn-ghost !py-1.5'}
+            >
+              {p.name}
+            </button>
+          ))}
+        </div>
+      )}
 
       {isLoading && <Spinner />}
       {error && <ErrorNote error={error} />}
@@ -201,7 +205,7 @@ export function PropertiesPage() {
 
       {addRoom && selectedId && (
         <Drawer open onClose={() => setAddRoom(false)} title="New room type">
-          {createRoom.error && <div className="mb-3"><LimitBanner error={createRoom.error} /></div>}
+          {createRoom.error && <div className="mb-3"><ErrorNote error={createRoom.error} /></div>}
           <RoomForm
             onSubmit={(v) => createRoom.mutate({ ...v, propertyId: selectedId })}
             busy={createRoom.isPending}
@@ -210,7 +214,7 @@ export function PropertiesPage() {
       )}
       {addProp && (
         <Drawer open onClose={() => setAddProp(false)} title="New property">
-          {createProp.error && <div className="mb-3"><LimitBanner error={createProp.error} /></div>}
+          {createProp.error && <div className="mb-3"><ErrorNote error={createProp.error} /></div>}
           <PropertyForm onSubmit={(v) => createProp.mutate(v)} busy={createProp.isPending} />
         </Drawer>
       )}

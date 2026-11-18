@@ -9,6 +9,8 @@ export interface User {
   role: 'admin' | 'manager' | 'viewer';
   organizationId: string | null;
   isSuperAdmin: boolean;
+  /** Set when this account is hard-restricted to one property. */
+  assignedPropertyId: string | null;
   impersonated?: boolean;
 }
 

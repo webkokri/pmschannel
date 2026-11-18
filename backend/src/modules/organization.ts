@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { prisma } from '../db';
 import { asyncHandler, parse } from '../lib/http';
 import { requireRole } from '../auth';
-import { requireOrg } from '../lib/tenant';
+import { requireOrg, requirePortfolioStaff } from '../lib/tenant';
 
 /** Org profile — "General Settings": branding, tax info, locale, invoice footer. */
 export const organizationRouter = Router();
@@ -30,6 +30,7 @@ const profileInput = z.object({
 organizationRouter.patch(
   '/',
   requireRole('admin'),
+  requirePortfolioStaff,
   asyncHandler(async (req, res) => {
     const body = parse(profileInput, req.body);
     const organization = await prisma.organization.update({

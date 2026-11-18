@@ -2,19 +2,19 @@ import { Router } from 'express';
 import bcrypt from 'bcryptjs';
 import { z } from 'zod';
 import { prisma } from '../db';
-import { asyncHandler, notFound, parse } from '../lib/http';
+import { asyncHandler, badRequest, notFound, parse } from '../lib/http';
 import { requireRole } from '../auth';
-import { requireOrg } from '../lib/tenant';
-import { assertWithinLimit } from '../lib/limits';
+import { requireOrg, requirePortfolioStaff } from '../lib/tenant';
 import { PERMISSIONS } from '../lib/permissions';
 
 /**
  * Staff directory — supersedes the user-facing half of modules/users.ts with the richer
  * profile fields (title/department/phone) and the granular permission overlay. Mounted
  * alongside `usersRouter` at a different path; `usersRouter` is kept for compatibility.
+ * Portfolio-wide only — a property-scoped manager doesn't manage staff.
  */
 export const staffRouter = Router();
-staffRouter.use(requireOrg);
+staffRouter.use(requireOrg, requirePortfolioStaff);
 
 staffRouter.get(
   '/',
@@ -33,6 +33,8 @@ staffRouter.get(
         department: true,
         phone: true,
         permissions: true,
+        assignedPropertyId: true,
+        assignedProperty: { select: { id: true, name: true } },
         createdAt: true,
       },
     });
@@ -50,6 +52,8 @@ const staffInput = z.object({
   password: z.string().min(8).optional(),
   active: z.boolean().optional(),
   permissions: z.array(z.enum(PERMISSIONS)).optional(),
+  /** Set to hard-restrict this staff member to one property; omit/null for portfolio-wide. */
+  assignedPropertyId: z.string().nullish(),
 });
 
 staffRouter.post(
@@ -58,7 +62,10 @@ staffRouter.post(
   asyncHandler(async (req, res) => {
     const organizationId = req.user!.organizationId!;
     const body = parse(staffInput.extend({ password: z.string().min(8) }), req.body);
-    await assertWithinLimit(organizationId, 'users');
+    if (body.assignedPropertyId) {
+      const property = await prisma.property.findUnique({ where: { id: body.assignedPropertyId } });
+      if (!property || property.organizationId !== organizationId) throw badRequest('Unknown property');
+    }
     const member = await prisma.user.create({
       data: {
         organizationId,
@@ -70,9 +77,21 @@ staffRouter.post(
         phone: body.phone,
         active: body.active ?? true,
         permissions: body.permissions ?? [],
+        assignedPropertyId: body.assignedPropertyId ?? null,
         passwordHash: await bcrypt.hash(body.password, 10),
       },
-      select: { id: true, email: true, name: true, role: true, active: true, title: true, department: true, phone: true, permissions: true },
+      select: {
+        id: true,
+        email: true,
+        name: true,
+        role: true,
+        active: true,
+        title: true,
+        department: true,
+        phone: true,
+        permissions: true,
+        assignedPropertyId: true,
+      },
     });
     res.status(201).json({ staff: member });
   }),
@@ -88,8 +107,13 @@ staffRouter.patch(
   '/:id',
   requireRole('admin'),
   asyncHandler(async (req, res) => {
-    await assertStaffOwned(req.params.id, req.user!.organizationId!);
+    const organizationId = req.user!.organizationId!;
+    await assertStaffOwned(req.params.id, organizationId);
     const body = parse(staffInput.partial(), req.body);
+    if (body.assignedPropertyId) {
+      const property = await prisma.property.findUnique({ where: { id: body.assignedPropertyId } });
+      if (!property || property.organizationId !== organizationId) throw badRequest('Unknown property');
+    }
     const data: Record<string, unknown> = { ...body };
     if (body.email) data.email = body.email.toLowerCase();
     if (body.password) data.passwordHash = await bcrypt.hash(body.password, 10);
@@ -97,7 +121,18 @@ staffRouter.patch(
     const member = await prisma.user.update({
       where: { id: req.params.id },
       data,
-      select: { id: true, email: true, name: true, role: true, active: true, title: true, department: true, phone: true, permissions: true },
+      select: {
+        id: true,
+        email: true,
+        name: true,
+        role: true,
+        active: true,
+        title: true,
+        department: true,
+        phone: true,
+        permissions: true,
+        assignedPropertyId: true,
+      },
     });
     res.json({ staff: member });
   }),

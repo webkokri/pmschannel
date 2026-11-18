@@ -1,10 +1,10 @@
 import { prisma } from '../src/db';
-import { FULL_CHANNEL_CATALOG, DEFAULT_PLANS } from '@cm/shared';
+import { FULL_CHANNEL_CATALOG } from '@cm/shared';
 
 export const PREFIX = `test_${Date.now().toString(36)}`;
 
-/** Minimal world: 1 organization (Enterprise plan), 1 property, 1 room (capacity
- *  configurable), 2 mock channels each mapped to the room, calendar seeded for 30 days. */
+/** Minimal world: 1 organization, 1 property, 1 room (capacity configurable), 2 mock
+ *  channels each mapped to the room, calendar seeded for 30 days. */
 export async function makeWorld(opts: { capacity?: number; channels?: string[] } = {}) {
   const capacity = opts.capacity ?? 2;
   const channelCodes = opts.channels ?? ['booking_com', 'airbnb'];
@@ -29,27 +29,8 @@ export async function makeWorld(opts: { capacity?: number; channels?: string[] }
     });
   }
 
-  // A permissive plan so limit checks never interfere with unrelated engine tests.
-  const enterprise = DEFAULT_PLANS.find((p) => p.code === 'enterprise')!;
-  const plan = await prisma.plan.upsert({
-    where: { code: enterprise.code },
-    update: {},
-    create: {
-      code: enterprise.code,
-      name: enterprise.name,
-      description: enterprise.description,
-      priceMonthlyCents: enterprise.priceMonthlyCents,
-      priceYearlyCents: enterprise.priceYearlyCents,
-      limits: enterprise.limits as object,
-      sortOrder: enterprise.sortOrder,
-    },
-  });
-
   const organization = await prisma.organization.create({
-    data: { name: `${PREFIX} Org`, slug: `${PREFIX}-org`, contactEmail: 'test@example.com', status: 'active' },
-  });
-  await prisma.subscription.create({
-    data: { organizationId: organization.id, planId: plan.id, status: 'active' },
+    data: { name: `${PREFIX} Org`, slug: `${PREFIX}-org`, contactEmail: 'test@example.com' },
   });
 
   const property = await prisma.property.create({

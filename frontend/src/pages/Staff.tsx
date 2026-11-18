@@ -2,7 +2,8 @@ import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '@/api/client';
 import { roleAtLeast, useAuth } from '@/lib/auth';
-import { Drawer, ErrorNote, LimitBanner, PageHeader, Spinner, Table } from '@/components/ui';
+import { useProperty } from '@/lib/property';
+import { Drawer, ErrorNote, PageHeader, Spinner, Table } from '@/components/ui';
 
 interface StaffMember {
   id: string;
@@ -14,6 +15,8 @@ interface StaffMember {
   department: string;
   phone: string;
   permissions: string[];
+  assignedPropertyId: string | null;
+  assignedProperty?: { id: string; name: string } | null;
 }
 
 export function StaffPage() {
@@ -63,7 +66,7 @@ export function StaffPage() {
 
       {isLoading && <Spinner />}
       {error && <ErrorNote error={error} />}
-      {create.error && <div className="mb-3"><LimitBanner error={create.error} /></div>}
+      {create.error && <div className="mb-3"><ErrorNote error={create.error} /></div>}
 
       {data && (
         <Table
@@ -72,6 +75,7 @@ export function StaffPage() {
               <th className="th">Name</th>
               <th className="th">Title / department</th>
               <th className="th">Role</th>
+              <th className="th">Assigned property</th>
               <th className="th">Extra permissions</th>
               <th className="th">Active</th>
               <th className="th" />
@@ -86,6 +90,9 @@ export function StaffPage() {
               </td>
               <td className="td text-slate-500">{[s.title, s.department].filter(Boolean).join(' · ') || '—'}</td>
               <td className="td capitalize">{s.role}</td>
+              <td className="td text-slate-500">
+                {s.assignedProperty ? s.assignedProperty.name : <span className="text-slate-400">portfolio-wide</span>}
+              </td>
               <td className="td">
                 <div className="flex flex-wrap gap-1">
                   {s.permissions.length === 0 && <span className="text-slate-400">—</span>}
@@ -148,6 +155,7 @@ function StaffForm({
   onSubmit: (v: Record<string, unknown>) => void;
   busy: boolean;
 }) {
+  const { properties } = useProperty();
   const [f, setF] = useState({
     email: initial?.email ?? '',
     name: initial?.name ?? '',
@@ -157,6 +165,7 @@ function StaffForm({
     phone: initial?.phone ?? '',
     password: '',
     permissions: initial?.permissions ?? ([] as string[]),
+    assignedPropertyId: initial?.assignedPropertyId ?? '',
   });
 
   const togglePerm = (p: string) => {
@@ -197,7 +206,22 @@ function StaffForm({
             <option value="admin">Admin</option>
           </select>
         </div>
+        <div>
+          <label className="label">Assigned property</label>
+          <select className="input" value={f.assignedPropertyId} onChange={(e) => setF({ ...f, assignedPropertyId: e.target.value })}>
+            <option value="">Portfolio-wide (no restriction)</option>
+            {properties.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name}
+              </option>
+            ))}
+          </select>
+        </div>
       </div>
+      <p className="text-xs text-slate-500">
+        Setting an assigned property hard-restricts this account to only that property — it won't see or touch any
+        other property's data.
+      </p>
       <div>
         <label className="label">{initial ? 'New password (leave blank to keep current)' : 'Password'}</label>
         <input className="input" type="password" minLength={8} value={f.password} onChange={(e) => setF({ ...f, password: e.target.value })} />
@@ -217,7 +241,7 @@ function StaffForm({
         className="btn-primary w-full"
         disabled={busy || !f.name || !f.email || (!initial && f.password.length < 8)}
         onClick={() => {
-          const payload: Record<string, unknown> = { ...f };
+          const payload: Record<string, unknown> = { ...f, assignedPropertyId: f.assignedPropertyId || null };
           if (!payload.password) delete payload.password;
           onSubmit(payload);
         }}

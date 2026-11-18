@@ -4,7 +4,7 @@ import { nightsBetween } from '@cm/shared';
 import { prisma } from '../db';
 import { asyncHandler, notFound, parse } from '../lib/http';
 import { requireRole } from '../auth';
-import { requireOrg, assertOwned } from '../lib/tenant';
+import { assertOwned, resolvePropertyFilter, requireOrg } from '../lib/tenant';
 import { recomputeAvailability, enqueueAvailabilityFanout } from '../engine/ari';
 import { evaluateBooking } from '../engine/conflict';
 
@@ -21,7 +21,7 @@ bookingsRouter.get(
 
     const where = {
       organizationId,
-      propertyId: q.propertyId ? String(q.propertyId) : undefined,
+      propertyId: resolvePropertyFilter(req, q.propertyId ? String(q.propertyId) : undefined),
       sourceChannelId: q.channelId ? String(q.channelId) : undefined,
       status: q.status ? (String(q.status) as never) : undefined,
       unmapped: q.unmapped === 'true' ? true : undefined,
@@ -70,6 +70,7 @@ bookingsRouter.get(
     const bookings = await prisma.booking.findMany({
       where: {
         organizationId,
+        propertyId: resolvePropertyFilter(req),
         status: { in: ['confirmed', 'modified'] },
         checkIn: { lt: to },
         checkOut: { gt: new Date(from + 'T00:00:00Z') },
@@ -110,6 +111,7 @@ bookingsRouter.get(
         }),
       req.user!.organizationId!,
       'Booking',
+      req,
     );
 
     const conflicts = await prisma.conflictAlert.findMany({
@@ -129,7 +131,7 @@ bookingsRouter.patch(
   '/:id/status',
   requireRole('manager'),
   asyncHandler(async (req, res) => {
-    await assertOwned(() => prisma.booking.findUnique({ where: { id: req.params.id } }), req.user!.organizationId!, 'Booking');
+    await assertOwned(() => prisma.booking.findUnique({ where: { id: req.params.id } }), req.user!.organizationId!, 'Booking', req);
     const body = parse(statusInput, req.body);
     const booking = await prisma.booking.update({
       where: { id: req.params.id },
@@ -159,6 +161,7 @@ bookingsRouter.post(
       () => prisma.booking.findUnique({ where: { id: req.params.id } }),
       req.user!.organizationId!,
       'Booking',
+      req,
     );
     if (!booking.roomTypeId) throw notFound('Booking has no mapped room type');
     const dates = nightsBetween(
